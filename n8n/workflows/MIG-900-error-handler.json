@@ -1,0 +1,203 @@
+{
+  "name": "MIG-900 Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Set as the errorWorkflow on every MIG-* workflow.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scope \u00a736: map whatever failed into the standard error taxonomy, so the\n// customer-facing dashboard can filter by cause and by whether a retry is\n// worth attempting.\nconst execution = $input.first().json ?? {};\nconst error = execution.execution?.error ?? execution.error ?? {};\nconst message = String(error.message ?? 'Unknown workflow error');\nconst status = error.httpCode ?? error.statusCode ?? error.status;\n\nfunction classify() {\n  const code = Number(status);\n  if (code === 401) return 'AUTHENTICATION_ERROR';\n  if (code === 403) return 'PERMISSION_ERROR';\n  if (code === 404) return 'SOURCE_NOT_FOUND';\n  if (code === 422) return 'VALIDATION_ERROR';\n  if (code === 429) return 'RATE_LIMIT';\n  if (code >= 500) return 'BUILDERLYNC_API_ERROR';\n  if (/timeout|etimedout|econnreset|socket hang up/i.test(message)) return 'SOURCE_TIMEOUT';\n  return 'UNKNOWN_ERROR';\n}\n\n// The migration id travels on the workflow input. Without it the error cannot\n// be attributed, so it is logged loudly rather than silently discarded.\nconst runData = execution.execution?.runData ?? {};\nconst inputNode = runData['Workflow Input']?.[0]?.data?.main?.[0]?.[0]?.json\n  ?? runData['Migration Trigger']?.[0]?.data?.main?.[0]?.[0]?.json?.body\n  ?? {};\n\nconst migrationId = inputNode.migration_id ?? null;\n\nreturn [{\n  json: {\n    migration_id: migrationId,\n    entity: inputNode.entity ?? null,\n    error_code: classify(),\n    message: message.slice(0, 2000),\n    workflow: execution.workflow?.name ?? 'unknown',\n    execution_id: execution.execution?.id ?? null,\n    attributable: Boolean(migrationId),\n  },\n}];"
+      },
+      "id": "classify-error",
+      "name": "Classify Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "notes": "Maps the failure into the Scope \u00a736 taxonomy.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.attributable }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "attributable-to-a-migration?",
+      "name": "Attributable To A Migration?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BUILDERLYNC_MIGRATION_API }}/internal/migration/{{ $json.migration_id }}/errors",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "=Bearer {{ $env.BUILDERLYNC_MIGRATION_TOKEN }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ entity: $json.entity, error_code: $json.error_code, message: $json.message, context: { workflow: $json.workflow, execution_id: $json.execution_id } }) }}"
+      },
+      "id": "record-against-migration",
+      "name": "Record Against Migration",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "notes": "The error becomes visible in the customer's error dashboard, filterable and retryable (Scope \u00a735).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// An error with no migration id cannot be shown to a customer, but it must not\n// vanish either -- it usually means the workflow failed before it read its\n// input, which is an infrastructure problem worth alerting on (Scope \u00a757).\nconsole.error('[MIG-900] Unattributable workflow failure', JSON.stringify($input.first().json));\nreturn $input.all();"
+      },
+      "id": "log-unattributable-failure",
+      "name": "Log Unattributable Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        380
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "done",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        920,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Classify Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Error": {
+      "main": [
+        [
+          {
+            "node": "Attributable To A Migration?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attributable To A Migration?": {
+      "main": [
+        [
+          {
+            "node": "Record Against Migration",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Unattributable Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Against Migration": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Unattributable Failure": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all"
+  },
+  "tags": [
+    {
+      "name": "builderlync-migration"
+    }
+  ],
+  "meta": {
+    "description": "Central error handler (Guide \u00a75.4). Classifies any MIG-* workflow failure into the Scope \u00a736 taxonomy and records it against the migration so it reaches the customer's error dashboard rather than only n8n's logs."
+  }
+}

@@ -1,0 +1,56 @@
+# Local development stack.
+#
+# The migration service itself runs on the host (pnpm dev) so the edit/test loop
+# stays fast; this file provides its dependencies.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: builderlync
+      POSTGRES_PASSWORD: builderlync
+      POSTGRES_DB: builderlync_migration
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U builderlync']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Guide §5.1-5.2: a self-hosted n8n with PERSISTENT storage. Migrations are
+  # long-running, so ephemeral execution state is not acceptable.
+  n8n:
+    image: n8nio/n8n:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      N8N_PORT: 5678
+      GENERIC_TIMEZONE: UTC
+      # Execution data is retained long enough to diagnose a failed migration.
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: 'true'
+      EXECUTIONS_DATA_PRUNE: 'true'
+      EXECUTIONS_DATA_MAX_AGE: 336        # hours (14 days)
+      # Guide §5.3 / §19: credentials are encrypted and never live in workflow
+      # JSON. Set this from your secret store, not from a checked-in default.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY}
+      # Endpoints the MIG-* workflows call.
+      BUILDERLYNC_MIGRATION_API: ${BUILDERLYNC_MIGRATION_API:-http://host.docker.internal:3001}
+      BUILDERLYNC_MIGRATION_TOKEN: ${BUILDERLYNC_MIGRATION_TOKEN:?set BUILDERLYNC_MIGRATION_TOKEN}
+    ports:
+      - '5678:5678'
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./n8n/workflows:/workflows:ro
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+volumes:
+  postgres-data:
+  n8n-data:

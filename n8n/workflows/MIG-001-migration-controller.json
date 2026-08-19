@@ -1,0 +1,361 @@
+{
+  "name": "MIG-001 Migration Controller",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mig-001-controller",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "migration-trigger",
+      "name": "Migration Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BUILDERLYNC_MIGRATION_API }}/api/migrations/{{ $json.body.migration_id }}/status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "=Bearer {{ $env.BUILDERLYNC_MIGRATION_TOKEN }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": false
+            }
+          }
+        }
+      },
+      "id": "fetch-migration-status",
+      "name": "Fetch Migration Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "notes": "BuilderLync is the system of record (Scope \u00a768). The controller asks it what state the migration is in rather than keeping state in n8n.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scope \u00a714: records migrate in dependency order. The controller expands the\n// customer's selection into the sequenced entity list and hands one item per\n// entity to the per-entity workflows.\n//\n// The order is fixed here rather than in each workflow so that adding an entity\n// does not mean editing every downstream workflow.\nconst ORDER = [\n  'user', 'team', 'custom_field', 'tag', 'pipeline', 'pipeline_stage',\n  'status_definition', 'contact', 'company', 'opportunity', 'job',\n  'note', 'activity', 'task', 'document', 'image',\n];\n\nconst trigger = $('Migration Trigger').first().json.body ?? {};\nconst status = $input.first().json ?? {};\nconst selected = trigger.entities ?? [];\n\nif (!trigger.migration_id) {\n  throw new Error('migration_id is required in the webhook body.');\n}\n\n// A migration that is already finished must not be silently re-run by a\n// stray webhook delivery.\nconst TERMINAL = ['COMPLETED', 'CUTOVER_COMPLETE', 'CANCELLED'];\nif (TERMINAL.includes(status.status) && !trigger.force) {\n  return [{ json: { skip: true, reason: `Migration is ${status.status}; pass force:true to re-run.` } }];\n}\n\nconst planned = ORDER.filter((e) => selected.length === 0 || selected.includes(e));\n\nreturn planned.map((entity, index) => ({\n  json: {\n    migration_id: trigger.migration_id,\n    entity,\n    sequence: index,\n    batch_size: trigger.batch_size ?? 500,\n    updated_since: trigger.updated_since ?? null,\n  },\n}));"
+      },
+      "id": "plan-entity-sequence",
+      "name": "Plan Entity Sequence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ],
+      "notes": "Expands the customer selection into Scope \u00a714's dependency order.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.entity }}",
+                    "rightValue": "contact",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "contacts"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.entity }}",
+                    "rightValue": "job",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "jobs"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "route-by-entity",
+      "name": "Route By Entity",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $env.N8N_WORKFLOW_MIG_100 }}",
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "mig-100-contacts",
+      "name": "MIG-100 Contacts",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        900,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": "={{ $env.N8N_WORKFLOW_MIG_140 }}",
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "mig-140-jobs",
+      "name": "MIG-140 Jobs",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        900,
+        320
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "other-entities-(extend-here)",
+      "name": "Other Entities (extend here)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        900,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BUILDERLYNC_MIGRATION_API }}/api/migrations/{{ $('Plan Entity Sequence').first().json.migration_id }}/validate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "=Bearer {{ $env.BUILDERLYNC_MIGRATION_TOKEN }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": false
+            }
+          }
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={}"
+      },
+      "id": "run-validation",
+      "name": "Run Validation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "notes": "Scope \u00a737: validation is a separate phase after transfer, and BuilderLync owns it.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, validation: $json }) }}",
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1360,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Migration Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Migration Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Migration Status": {
+      "main": [
+        [
+          {
+            "node": "Plan Entity Sequence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Entity Sequence": {
+      "main": [
+        [
+          {
+            "node": "Route By Entity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route By Entity": {
+      "main": [
+        [
+          {
+            "node": "MIG-100 Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "MIG-140 Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Other Entities (extend here)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MIG-100 Contacts": {
+      "main": [
+        [
+          {
+            "node": "Run Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MIG-140 Jobs": {
+      "main": [
+        [
+          {
+            "node": "Run Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Other Entities (extend here)": {
+      "main": [
+        [
+          {
+            "node": "Run Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Validation": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "errorWorkflow": "={{ $env.N8N_WORKFLOW_MIG_900 }}"
+  },
+  "tags": [
+    {
+      "name": "builderlync-migration"
+    }
+  ],
+  "meta": {
+    "description": "Migration controller (Guide \u00a75.4). Reads migration state from BuilderLync, expands the entity selection into Scope \u00a714 dependency order, dispatches per-entity workflows, then triggers validation. Holds no migration state of its own -- Scope \u00a768 puts state in the migration platform."
+  }
+}

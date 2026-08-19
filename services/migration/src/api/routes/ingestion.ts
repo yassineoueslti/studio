@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { ENTITY_TYPES, type EntityType } from '../../domain/entities.js';
+import { ERROR_CODES } from '../../domain/errors.js';
 import { getDestination } from '../../destination/index.js';
 import { requireAuth } from '../auth.js';
 
@@ -157,6 +158,107 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
     });
 
     return { candidates };
+  });
+
+  /**
+   * Checkpoint recording for externally-driven extraction (Scope §27).
+   *
+   * When n8n owns extraction -- the production topology for vendor adapters --
+   * it must still checkpoint into BuilderLync rather than into n8n execution
+   * state, because Scope §68 puts migration state in the migration platform and
+   * leaves n8n as the orchestration engine. This is the endpoint that keeps that
+   * boundary honest: an n8n execution can die at any point and the migration
+   * resumes from what BuilderLync recorded.
+   */
+  app.post('/internal/migration/:migrationId/checkpoint', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+
+    const { migrationId } = z.object({ migrationId: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      entity: z.enum(ENTITY_TYPES),
+      cursor: z.unknown().nullish(),
+      last_source_id: z.string().nullish(),
+      records_processed: z.number().int().nonnegative(),
+      batch_number: z.number().int().nonnegative(),
+      extraction_complete: z.boolean().default(false),
+    }).parse(request.body);
+
+    const { withTransaction } = await import('../../db/pool.js');
+    const recordsRepo = await import('../../db/repositories/records.js');
+
+    await withTransaction((client) =>
+      recordsRepo.saveCheckpoint(client, {
+        migrationId,
+        tenantId: principal.tenantId,
+        entity: body.entity,
+        cursor: body.cursor ?? null,
+        lastSourceId: body.last_source_id ?? null,
+        recordsProcessed: body.records_processed,
+        batchNumber: body.batch_number,
+        extractionComplete: body.extraction_complete,
+      }),
+    );
+
+    return { checkpointed: true };
+  });
+
+  /** Resume support: where should the caller pick up for this entity? */
+  app.get('/internal/migration/:migrationId/checkpoint/:entity', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+
+    const params = z.object({
+      migrationId: z.string().uuid(),
+      entity: z.enum(ENTITY_TYPES),
+    }).parse(request.params);
+
+    const recordsRepo = await import('../../db/repositories/records.js');
+    const checkpoint = await recordsRepo.getCheckpoint(principal.tenantId, params.migrationId, params.entity);
+
+    return {
+      // A migration with no checkpoint starts from the beginning; that is a
+      // normal first run, not an error.
+      cursor: checkpoint?.cursor_json ?? null,
+      batch_number: checkpoint?.batch_number ?? 0,
+      records_processed: checkpoint?.records_processed ?? 0,
+      extraction_complete: checkpoint?.extraction_complete ?? false,
+    };
+  });
+
+  /** Error reporting from an orchestrator worker (MIG-900). */
+  app.post('/internal/migration/:migrationId/errors', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+
+    const { migrationId } = z.object({ migrationId: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      entity: z.string().nullish(),
+      source_id: z.string().nullish(),
+      error_code: z.enum(ERROR_CODES).default('UNKNOWN_ERROR'),
+      message: z.string().min(1),
+      context: z.record(z.string(), z.unknown()).optional(),
+    }).parse(request.body);
+
+    const { withTransaction } = await import('../../db/pool.js');
+    const errorsRepo = await import('../../db/repositories/errors.js');
+    const { MigrationError } = await import('../../domain/errors.js');
+
+    await withTransaction((client) =>
+      errorsRepo.recordError(client, {
+        migrationId,
+        tenantId: principal.tenantId,
+        entity: body.entity ?? null,
+        sourceId: body.source_id ?? null,
+        error: new MigrationError(body.error_code, body.message, {
+          entity: body.entity ?? undefined,
+          sourceId: body.source_id ?? undefined,
+          raw: body.context,
+        }),
+      }),
+    );
+
+    return { recorded: true };
   });
 
   app.get('/internal/migration/:migrationId/counts', async (request, reply) => {

@@ -1,0 +1,469 @@
+{
+  "name": "MIG-100 Contacts",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "workflow-input",
+      "name": "Workflow Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Called by MIG-001 with { migration_id, entity, batch_size, updated_since }.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.BUILDERLYNC_MIGRATION_API }}/internal/migration/{{ $json.migration_id }}/checkpoint/contact",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "=Bearer {{ $env.BUILDERLYNC_MIGRATION_TOKEN }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "load-checkpoint",
+      "name": "Load Checkpoint",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "stopWorkflow",
+      "notes": "Scope \u00a727: resume position comes from BuilderLync, not from n8n execution state. This is what makes a dead n8n execution survivable.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.extraction_complete }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "already-complete?",
+      "name": "Already Complete?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ],
+      "notes": "A finished entity is skipped on resume rather than re-extracted.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "skip",
+      "name": "Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        660,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Source-specific extraction and transformation live HERE and nowhere else.\n// Scope \u00a788: source field names must not leak past this boundary -- everything\n// downstream sees only canonical objects.\n//\n// Contacts are the dependency root for opportunities, jobs, notes and files, so this workflow must complete before those run (Scope \u00a714).\n//\n// Replace the body of extractPage() with the vendor call for this source. The\n// rest of this workflow is source-agnostic and is shared by every connector.\n\nconst input = $('Load Checkpoint').first().json;\nconst plan = $('Workflow Input').first().json;\n\nasync function extractPage(cursor, pageSize) {\n  // --- VENDOR CALL GOES HERE ---------------------------------------------\n  // Must return { records: [...], cursor: <opaque>, hasMore: boolean }.\n  // Scope \u00a726: the adapter decides the pagination shape (page / offset /\n  // cursor / next-URL / date-range); this workflow only passes the cursor\n  // back and forth opaquely.\n  throw new Error(\n    'MIG-100 has no vendor extraction wired up yet. Implement extractPage() ' +\n    'for the source connector, or run the migration through the in-process ' +\n    'orchestrator (POST /api/migrations/:id/start), which uses the same adapter contract.'\n  );\n}\n\nconst page = await extractPage(input.cursor, plan.batch_size);\n\n// Canonical shape (Guide \u00a73.1): every record carries its own provenance so any\n// BuilderLync row can be traced back to source platform, tenant, type and id.\nconst records = page.records.map((raw) => ({\n  source_id: String(raw.id),\n  idempotency_key: `mig_${plan.migration_id}:${plan.source_platform}:contact:${raw.id}`,\n  content_hash: null, // computed by the Hash Records node below\n  payload: {\n    migration_id: plan.migration_id,\n    source_platform: plan.source_platform,\n    source_object_type: 'contact',\n    source_object_id: String(raw.id),\n    transformer_version: `${plan.source_platform}-contact-v1.0.0`,\n    warnings: [],\n    // ... map the vendor's fields onto the canonical schema here ...\n  },\n}));\n\nreturn [{\n  json: {\n    ...plan,\n    records,\n    cursor: page.cursor,\n    has_more: page.hasMore,\n    batch_number: (input.batch_number ?? 0) + 1,\n    records_processed: (input.records_processed ?? 0) + records.length,\n  },\n}];"
+      },
+      "id": "extract-and-normalize",
+      "name": "Extract And Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        380
+      ],
+      "notes": "The ONLY source-specific node in this workflow (Guide \u00a75.5).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scope \u00a711: the content hash is what lets a replay skip an unchanged record\n// instead of issuing a pointless destination write. It must be computed the\n// same way on every run, so object keys are sorted before hashing.\nconst crypto = require('crypto');\n\nfunction stable(value) {\n  if (value === null || value === undefined) return 'null';\n  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;\n  if (typeof value === 'object') {\n    return `{${Object.entries(value)\n      .filter(([k]) => !['migration_id', 'transformer_version', 'warnings', 'raw_source_reference'].includes(k))\n      .sort(([a], [b]) => (a < b ? -1 : 1))\n      .map(([k, v]) => `${JSON.stringify(k)}:${stable(v)}`)\n      .join(',')}}`;\n  }\n  return JSON.stringify(value);\n}\n\nconst item = $input.first().json;\nitem.records = item.records.map((r) => ({\n  ...r,\n  content_hash: crypto.createHash('sha256').update(stable(r.payload)).digest('hex'),\n}));\nreturn [{ json: item }];"
+      },
+      "id": "hash-records",
+      "name": "Hash Records",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        380
+      ],
+      "notes": "Deterministic content hash for idempotent replay (Scope \u00a711).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BUILDERLYNC_MIGRATION_API }}/internal/migration/contacts/batch",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "=Bearer {{ $env.BUILDERLYNC_MIGRATION_TOKEN }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ migration_id: $json.migration_id, records: $json.records }) }}"
+      },
+      "id": "load-batch-into-builderlync",
+      "name": "Load Batch Into BuilderLync",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "notes": "Idempotency keys make this safe to retry; BuilderLync deduplicates, validates and persists (Scope \u00a769).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Scope \u00a744: the response must carry a result for EVERY record sent. Verifying\n// it here means a short response surfaces immediately, rather than as an\n// unexplained reconciliation variance hours later.\nconst sent = $('Hash Records').first().json.records;\nconst response = $input.first().json;\nconst results = response.results ?? [];\n\nconst returned = new Set(results.map((r) => r.source_id));\nconst missing = sent.filter((r) => !returned.has(r.source_id));\n\nif (missing.length > 0) {\n  throw new Error(\n    `Ingestion returned ${results.length} results for ${sent.length} records; ` +\n    `${missing.length} unaccounted for (first: ${missing[0].source_id}).`\n  );\n}\n\nconst tally = results.reduce((acc, r) => {\n  acc[r.status] = (acc[r.status] ?? 0) + 1;\n  return acc;\n}, {});\n\nreturn [{ json: { ...$('Hash Records').first().json, results, tally } }];"
+      },
+      "id": "account-for-every-record",
+      "name": "Account For Every Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        380
+      ],
+      "notes": "Scope \u00a744: one bad record must not make a batch unaccountable.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BUILDERLYNC_MIGRATION_API }}/internal/migration/{{ $json.migration_id }}/checkpoint",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "=Bearer {{ $env.BUILDERLYNC_MIGRATION_TOKEN }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ entity: $json.entity, cursor: $json.cursor, records_processed: $json.records_processed, batch_number: $json.batch_number, extraction_complete: !$json.has_more }) }}"
+      },
+      "id": "save-checkpoint",
+      "name": "Save Checkpoint",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        380
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "notes": "Checkpoint AFTER the batch is accounted for. Ordering matters: checkpointing first would lose a batch on crash.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Account For Every Record').first().json.has_more }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "more-pages?",
+      "name": "More Pages?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        380
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "next-page",
+      "name": "Next Page",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        300
+      ],
+      "notes": "Loops back to extraction with the stored cursor. n8n's execution-progress saving plus BuilderLync checkpoints mean an interrupted loop resumes, not restarts.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "entity-complete",
+      "name": "Entity Complete",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BUILDERLYNC_MIGRATION_API }}/internal/migration/{{ $('Workflow Input').first().json.migration_id }}/errors",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "authorization",
+              "value": "=Bearer {{ $env.BUILDERLYNC_MIGRATION_TOKEN }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ entity: 'contact', error_code: 'UNKNOWN_ERROR', message: String($json.error ?? $json.message ?? 'Unknown workflow error'), context: { workflow: 'MIG-100' } }) }}"
+      },
+      "id": "report-error",
+      "name": "Report Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        620
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "notes": "Errors are recorded in BuilderLync so they appear in the customer's error dashboard (Scope \u00a735), not only in n8n execution logs.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Workflow Input": {
+      "main": [
+        [
+          {
+            "node": "Load Checkpoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Checkpoint": {
+      "main": [
+        [
+          {
+            "node": "Already Complete?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Complete?": {
+      "main": [
+        [
+          {
+            "node": "Skip",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract And Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract And Normalize": {
+      "main": [
+        [
+          {
+            "node": "Hash Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash Records": {
+      "main": [
+        [
+          {
+            "node": "Load Batch Into BuilderLync",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Batch Into BuilderLync": {
+      "main": [
+        [
+          {
+            "node": "Account For Every Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Account For Every Record": {
+      "main": [
+        [
+          {
+            "node": "Save Checkpoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Checkpoint": {
+      "main": [
+        [
+          {
+            "node": "More Pages?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "More Pages?": {
+      "main": [
+        [
+          {
+            "node": "Next Page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Entity Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next Page": {
+      "main": [
+        [
+          {
+            "node": "Extract And Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveExecutionProgress": true,
+    "errorWorkflow": "={{ $env.N8N_WORKFLOW_MIG_900 }}"
+  },
+  "tags": [
+    {
+      "name": "builderlync-migration"
+    }
+  ],
+  "meta": {
+    "description": "Per-entity migration workflow for contact (Guide \u00a75.4). Extraction and transformation are isolated in one node; everything else is shared by all connectors (Guide \u00a75.5). Resume position and error state live in BuilderLync, never in n8n."
+  }
+}
