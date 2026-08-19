@@ -1,0 +1,14 @@
+{
+  "name": "builderlync-migration-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BuilderLync Universal CRM Migration Engine",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "dev": "pnpm --filter @builderlync/migration dev",
+    "db:migrate": "pnpm --filter @builderlync/migration db:migrate",
+    "demo": "pnpm --filter @builderlync/migration demo"
+  }
+}
