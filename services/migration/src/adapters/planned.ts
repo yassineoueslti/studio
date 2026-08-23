@@ -281,7 +281,7 @@ export const ROOFR_SPEC: PlannedAdapterSpec = {
         upload:
           'Uploads arrive through BuilderLync, never through an unprotected n8n webhook (Guide §11.1).',
         delta:
-          'Export-based migration has no watermark, so delta sync is unavailable until API access exists.',
+          'Export-based migration has no watermark, so timestamp-based delta sync is unavailable until API access exists. A second pass is still possible by re-uploading a fresh export: unchanged rows match on content hash and are skipped, so only genuinely new or edited records are written.',
       },
     },
   ),
@@ -296,11 +296,24 @@ export const ROOFR_SPEC: PlannedAdapterSpec = {
   designNotes: [
     'Reuses the generic file-ingestion components; Roofr export records become the same canonical objects as API adapters (Guide §11.6, §12).',
     'Mapping preview must show source field -> BuilderLync field, sample values, unmapped fields and validation errors before import (Guide §11.4).',
+    'FIRST CONNECTOR TO BUILD. Roofr is the source in active use for live client migrations, so working extraction here removes real onboarding effort immediately.',
+    'Existing migration scripts already move Roofr job data for onboarding. Review those before writing anything: they encode field mappings and quirks discovered against real client exports, which is knowledge no amount of documentation reading reproduces.',
+    'Export-based sources have no updated-at watermark, so the two-pass model (historical, then final delta before go-live) must be driven by re-uploading a fresh export and relying on content hashing to skip unchanged rows -- not by a timestamp filter.',
   ],
 };
 
+/**
+ * Build order.
+ *
+ * Guide §21 puts HighLevel first, on the reasoning that it has the most modern
+ * API surface. Current delivery reality overrides that: Roofr is the source
+ * actively being migrated for live clients, so it is the connector whose
+ * absence costs onboarding time today. HighLevel remains the better *second*
+ * connector for exactly the reason the guide gives -- OAuth, webhooks and delta
+ * sync make it the right place to prove the API-first path.
+ */
 export const PLANNED_SPECS: readonly PlannedAdapterSpec[] = Object.freeze([
-  HIGHLEVEL_SPEC, ACCULYNX_SPEC, JOBNIMBUS_SPEC, PROLINE_SPEC, ROOFR_SPEC,
+  ROOFR_SPEC, HIGHLEVEL_SPEC, ACCULYNX_SPEC, JOBNIMBUS_SPEC, PROLINE_SPEC,
 ]);
 
 /**

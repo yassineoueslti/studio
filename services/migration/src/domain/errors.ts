@@ -199,3 +199,27 @@ export function toMigrationError(
   const message = err instanceof Error ? err.message : String(err);
   return new MigrationError(code, message, context, { cause: err });
 }
+
+/**
+ * A run stopped because an operator paused or cancelled it, or because the
+ * caller's abort signal fired.
+ *
+ * Deliberately NOT a MigrationError: an abort is not a fault, and classifying
+ * it as one would record it in the customer's error dashboard and let the
+ * retry logic treat it as a transient failure worth retrying. It lives in the
+ * domain layer rather than in the pipeline so that every layer -- orchestrator,
+ * retry loop, file transfer -- reports an abort the same identifiable way.
+ */
+export class MigrationAborted extends Error {
+  readonly reason: 'paused' | 'cancelled' | 'signal';
+
+  constructor(reason: 'paused' | 'cancelled' | 'signal' = 'signal') {
+    super(`Migration run aborted (${reason})`);
+    this.name = 'MigrationAborted';
+    this.reason = reason;
+  }
+}
+
+export function isAborted(err: unknown): err is MigrationAborted {
+  return err instanceof MigrationAborted;
+}

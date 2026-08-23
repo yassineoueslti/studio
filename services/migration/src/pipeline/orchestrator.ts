@@ -8,7 +8,7 @@ import * as recordsRepo from '../db/repositories/records.js';
 import { DEFAULT_DEDUPE_POLICY, matchContact, type DedupePolicy } from '../dedupe/matcher.js';
 import type { DestinationClient } from '../destination/types.js';
 import { ENTITY_PLAN, planFor, sequence, type EntityType } from '../domain/entities.js';
-import { MigrationError, toMigrationError } from '../domain/errors.js';
+import { MigrationAborted, MigrationError, toMigrationError } from '../domain/errors.js';
 import type { RecordState } from '../domain/states.js';
 import { createLogger, silentLogger, type Logger } from '../observability/logger.js';
 import { metrics } from '../observability/metrics.js';
@@ -54,13 +54,6 @@ export interface RunResult {
   batchesProcessed: number;
   recordsProcessed: number;
   aborted: boolean;
-}
-
-export class MigrationAborted extends Error {
-  constructor(readonly reason: 'paused' | 'cancelled' | 'signal') {
-    super(`Migration run aborted (${reason})`);
-    this.name = 'MigrationAborted';
-  }
 }
 
 /** Injected crash, used to prove resume-after-failure in tests and the demo. */
@@ -712,3 +705,6 @@ function fallbackSourceId(raw: unknown, entity: EntityType, batchNumber: number,
 }
 
 export { ENTITY_PLAN, planFor, createLogger, getPool, migrationsRepo };
+// Re-exported so pipeline callers can catch an abort without reaching into
+// the domain layer for it.
+export { MigrationAborted };

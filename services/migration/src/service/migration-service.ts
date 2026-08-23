@@ -16,6 +16,7 @@ import { buildManifest, MIGRATION_REPORT_VERSION, type MigrationManifest } from 
 import { reconcile, type ReconciliationReport } from '../validation/reconcile.js';
 import { supports, supportedEntities, type AdapterContext, type SourceAdapter } from '../adapters/types.js';
 import { Orchestrator, type OrchestratorOptions } from '../pipeline/orchestrator.js';
+import { OnboardingService, type PassType } from './onboarding.js';
 
 /**
  * The migration service: the control plane behind the API (Guide §4).
@@ -41,8 +42,23 @@ export class MigrationService {
   private readonly destination: DestinationClient;
   private readonly logger: Logger;
   private readonly adapterFor: ServiceDeps['adapterFor'];
-  /** In-flight run controls, so pause/cancel can interrupt a running worker. */
+  /**
+   * In-flight run controls, so pause/cancel can interrupt a running worker.
+   * Keyed by tenant *and* migration so the presence of a key can never reveal
+   * another tenant's activity.
+   */
   private readonly running = new Map<string, AbortController>();
+
+  /**
+   * Migrations an operator deliberately stopped. The orchestrator reports a
+   * deliberate stop the same way it reports a crash -- by throwing -- so
+   * without this the run's error path would overwrite the operator's chosen
+   * state with FAILED.
+   */
+  private readonly interrupted = new Map<string, 'paused' | 'cancelled'>();
+
+  /** Migration passes, the go-live checklist and the onboarding SLA. */
+  readonly onboarding = new OnboardingService();
 
   constructor(deps: ServiceDeps) {
     this.destination = deps.destination ?? getDestination();
@@ -287,7 +303,16 @@ export class MigrationService {
   async start(
     principal: Principal,
     migrationId: string,
-    options: { skipPreflight?: boolean; runnerOptions?: Partial<OrchestratorOptions> } = {},
+    options: {
+      skipPreflight?: boolean;
+      runnerOptions?: Partial<OrchestratorOptions>;
+      /**
+       * Which pass this run is (Aug 21 delivery model). Defaults to
+       * HISTORICAL for a first run and DELTA for a re-run, which is what an
+       * operator means in each case.
+       */
+      pass?: PassType;
+    } = {},
   ): Promise<{ started: boolean; preflight?: Awaited<ReturnType<MigrationService['preflight']>> }> {
     permissions.require(principal, 'migration.start');
     const migration = await this.requireMigration(principal, migrationId);
@@ -305,7 +330,22 @@ export class MigrationService {
       migrationId, tenantId: principal.tenantId, actorId: principal.userId, action: 'migration.started',
     });
 
-    await this.execute(principal, migrationId, options.runnerOptions ?? {});
+    // The checklist exists from the first run, so training and configuration
+    // can proceed alongside the data load rather than queueing behind it.
+    await this.onboarding.initializeChecklist(principal, migrationId);
+
+    const existingPasses = await this.onboarding.listPasses(principal, migrationId);
+    const passType: PassType = options.pass ?? (existingPasses.length === 0 ? 'HISTORICAL' : 'DELTA');
+    const { extractedSince } = await this.onboarding.beginPass(principal, migrationId, passType);
+
+    await this.execute(principal, migrationId, {
+      ...(options.runnerOptions ?? {}),
+      // A delta pass extracts only what changed since the previous pass's
+      // watermark. A historical pass takes everything.
+      updatedSince: extractedSince,
+    });
+
+    await this.onboarding.completePass(principal, migrationId);
     return { started: true };
   }
 
@@ -319,15 +359,28 @@ export class MigrationService {
     migrationId: string,
     runnerOptions: Partial<OrchestratorOptions> = {},
   ): Promise<void> {
-    const migration = await this.requireMigration(principal, migrationId);
-    const adapter = await this.adapterFor(migration.source_platform as SourcePlatform, migrationId);
-    const controller = new AbortController();
-    this.running.set(migrationId, controller);
+    const key = this.runKey(principal.tenantId, migrationId);
 
-    const context = this.contextFor(migration);
-    const selected = this.selectedEntities(migration, adapter);
+    // Check-and-reserve with no await in between, so two concurrent callers
+    // cannot both pass. Without this, both would drive the same migration:
+    // same-state transitions are permitted, so the state machine does not stop
+    // them, and every remaining page would be extracted and loaded twice.
+    if (this.running.has(key)) {
+      throw new MigrationError(
+        'VALIDATION_ERROR',
+        `Migration ${migrationId} is already running. Pause it before starting another run.`,
+        { migrationId },
+      );
+    }
+    const controller = new AbortController();
+    this.running.set(key, controller);
 
     try {
+      const migration = await this.requireMigration(principal, migrationId);
+      const adapter = await this.adapterFor(migration.source_platform as SourcePlatform, migrationId);
+      const context = this.contextFor(migration);
+      const selected = this.selectedEntities(migration, adapter);
+
       await migrationsRepo.transitionState(principal.tenantId, migrationId, 'EXTRACTING');
 
       const orchestrator = new Orchestrator({
@@ -364,23 +417,57 @@ export class MigrationService {
         detail: { final_state: next, validation_passed: reconciliation.overallPassed },
       });
     } catch (err) {
-      // A crash leaves the migration FAILED, not stuck mid-phase. Checkpoints
-      // are already durable, so resume() continues from the last safe point.
-      await migrationsRepo.transitionState(principal.tenantId, migrationId, 'FAILED');
-      await this.refreshStatistics(principal.tenantId, migrationId);
+      // A deliberate pause or cancel reaches here as a thrown MigrationAborted,
+      // indistinguishable from a crash by type alone. Forcing FAILED here would
+      // overwrite the state the operator just chose, so the operator's intent
+      // wins and their state stands.
+      if (!this.interrupted.has(key)) {
+        // A genuine crash leaves the migration FAILED, not stuck mid-phase.
+        // Checkpoints are durable, so resume() continues from the last safe
+        // point.
+        try {
+          await migrationsRepo.transitionState(principal.tenantId, migrationId, 'FAILED');
+        } catch (bookkeepingError) {
+          // Recording the failure must never replace the reason for it. A
+          // caller debugging a migration needs the original error, not an
+          // error about writing down the original error.
+          this.logger.error('Could not record FAILED state after a migration error', {
+            migration_id: migrationId,
+            tenant_id: principal.tenantId,
+            error: (bookkeepingError as Error).message,
+          });
+        }
+      }
+
+      try {
+        await this.refreshStatistics(principal.tenantId, migrationId);
+      } catch {
+        // Statistics are a convenience; losing them must not mask the error.
+      }
+
       throw err;
     } finally {
-      this.running.delete(migrationId);
+      this.running.delete(key);
+      this.interrupted.delete(key);
     }
+  }
+
+  /** Run-control key. Tenant-scoped so presence never leaks across tenants. */
+  private runKey(tenantId: string, migrationId: string): string {
+    return `${tenantId}:${migrationId}`;
   }
 
   // --- pause / resume / cancel (Scope §34) -------------------------------
   async pause(principal: Principal, migrationId: string): Promise<void> {
     permissions.require(principal, 'migration.pause');
     await this.requireMigration(principal, migrationId);
+    // Intent is recorded BEFORE the abort, so the run's error path can already
+    // see that this stop was deliberate by the time it unwinds.
+    const key = this.runKey(principal.tenantId, migrationId);
+    this.interrupted.set(key, 'paused');
     // Pause completes the current safe batch: the controller is checked between
     // batches, never mid-write, so state is always consistent on stop.
-    this.running.get(migrationId)?.abort();
+    this.running.get(key)?.abort();
     await migrationsRepo.transitionState(principal.tenantId, migrationId, 'PAUSED');
     await migrationsRepo.recordAudit(getPool(), {
       migrationId, tenantId: principal.tenantId, actorId: principal.userId, action: 'migration.paused',
@@ -400,7 +487,9 @@ export class MigrationService {
   async cancel(principal: Principal, migrationId: string): Promise<void> {
     permissions.require(principal, 'migration.cancel');
     await this.requireMigration(principal, migrationId);
-    this.running.get(migrationId)?.abort();
+    const key = this.runKey(principal.tenantId, migrationId);
+    this.interrupted.set(key, 'cancelled');
+    this.running.get(key)?.abort();
     await migrationsRepo.transitionState(principal.tenantId, migrationId, 'CANCELLED');
     await migrationsRepo.recordAudit(getPool(), {
       migrationId, tenantId: principal.tenantId, actorId: principal.userId, action: 'migration.cancelled',

@@ -332,6 +332,65 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { accepted: true };
   });
 
+  // --- onboarding: passes, checklist, go-live readiness -------------------
+  // Added for the Aug 21 delivery model: training runs alongside the
+  // historical pass, then a final delta immediately before go-live.
+
+  app.get('/api/migrations/:id/onboarding', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+    const { id } = uuidParam.parse(request.params);
+    return await service.onboarding.goLiveReadiness(principal, id);
+  });
+
+  app.post('/api/migrations/:id/onboarding/checklist', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+    const { id } = uuidParam.parse(request.params);
+    return { tasks: await service.onboarding.initializeChecklist(principal, id) };
+  });
+
+  app.patch('/api/migrations/:id/onboarding/tasks/:taskKey', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+    const params = z.object({ id: z.string().uuid(), taskKey: z.string().min(1) }).parse(request.params);
+    const body = z.object({
+      status: z.enum(['PENDING', 'IN_PROGRESS', 'DONE', 'NOT_APPLICABLE']).optional(),
+      owner: z.string().nullish(),
+      notes: z.string().nullish(),
+    }).parse(request.body ?? {});
+
+    return {
+      task: await service.onboarding.updateTask(principal, params.id, params.taskKey, {
+        status: body.status,
+        owner: body.owner ?? null,
+        notes: body.notes ?? null,
+      }),
+    };
+  });
+
+  app.get('/api/migrations/:id/passes', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+    const { id } = uuidParam.parse(request.params);
+    return { passes: await service.onboarding.listPasses(principal, id) };
+  });
+
+  /**
+   * Run the final delta immediately before go-live. Distinct from a plain
+   * start() so the intent is recorded, the right checklist item closes, and
+   * the report can say which pass loaded what.
+   */
+  app.post('/api/migrations/:id/final-delta', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
+    const { id } = uuidParam.parse(request.params);
+
+    const result = await service.start(principal, id, { skipPreflight: true, pass: 'FINAL_DELTA' });
+    const readiness = await service.onboarding.goLiveReadiness(principal, id);
+    return { started: result.started, readiness };
+  });
+
   // --- duplicates (Scope §20 review queue) --------------------------------
   app.get('/api/migrations/:id/duplicates', async (request, reply) => {
     const principal = requireAuth(request, reply);

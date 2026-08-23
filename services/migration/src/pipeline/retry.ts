@@ -1,4 +1,4 @@
-import { MigrationError, toMigrationError } from '../domain/errors.js';
+import { MigrationAborted, MigrationError, toMigrationError } from '../domain/errors.js';
 import type { RateLimitProfile } from '../adapters/types.js';
 
 /**
@@ -55,13 +55,16 @@ export async function withRetry<T>(fn: (attempt: number) => Promise<T>, options:
   let lastError: MigrationError | undefined;
 
   for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
-    if (options.signal?.aborted) {
-      throw new MigrationError('UNKNOWN_ERROR', 'Operation aborted before completion', {});
-    }
+    if (options.signal?.aborted) throw new MigrationAborted();
 
     try {
       return await fn(attempt);
     } catch (err) {
+      // An abort is a decision, not a fault. Retrying it would keep the worker
+      // alive for several more backoff cycles after an operator asked it to
+      // stop, and would surface a pause as a retried error.
+      if (err instanceof MigrationAborted) throw err;
+
       const error = toMigrationError(err);
       lastError = error;
 

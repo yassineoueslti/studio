@@ -38,7 +38,7 @@ $ pnpm demo
 SPRINT 1 ACCEPTANCE: PASSED
 ```
 
-**73 tests pass**, including all eleven of Guide §20's named
+**84 tests pass**, including all eleven of Guide §20's named
 production-readiness tests.
 
 The five launch connectors — GoHighLevel, AccuLynx, JobNimbus, ProLine, Roofr —
@@ -57,7 +57,7 @@ openssl rand -base64 32          # → MIGRATION_SECRET_KEY in .env
 pnpm install
 pnpm db:migrate
 
-pnpm test     # 73 tests
+pnpm test     # 84 tests
 pnpm demo     # Sprint 1 acceptance run
 pnpm dev      # API on :3001
 ```
@@ -80,6 +80,12 @@ Full walkthrough, including driving a whole migration from cURL:
 ---
 
 ## What is built
+
+**Delivery workflow**
+Named migration passes (historical → delta → final delta) so client training
+runs alongside the bulk load · go-live readiness that names its blockers ·
+20-item onboarding checklist spanning data, configuration, training and
+sign-off · 30-day SLA tracking.
 
 **Platform**
 Migration database (all `migration_*` tables) · migration and record state
@@ -111,6 +117,7 @@ driver** is ready for the real API; both are held to the same contract.
 |---|---|
 | [`docs/DESTINATION_INVENTORY.md`](docs/DESTINATION_INVENTORY.md) | **Guide §1.1** — the BuilderLync contract. Ingestion endpoints, idempotency rules, batch response shape, and the per-entity field tables to confirm |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Responsibility split, both supported topologies, the batch request path and why its ordering matters |
+| [`docs/DELIVERY_MODEL.md`](docs/DELIVERY_MODEL.md) | How a client migration actually runs: the two-pass model with training alongside, go-live readiness, the 30-day SLA |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Guide §19's eleven items, each with state and location |
 | [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) | Guide §20's eleven tests mapped to implementations |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Guide §21's twenty steps with current state, and the next sprint |
@@ -128,7 +135,7 @@ services/migration/     the migration service (Guide §22)
   src/pipeline/         orchestrator, retry, rate limiting
   src/dedupe/           confidence-tier matching
   src/validation/       reconciliation
-  test/                 73 tests
+  test/                 84 tests
   scripts/              Sprint 1 acceptance run
 n8n/workflows/          MIG-001, MIG-100, MIG-140, MIG-900
 docs/                   the documents above
@@ -138,12 +145,18 @@ docs/                   the documents above
 
 ## Next step
 
-Guide §21 step 7: the **HighLevel connector** — chosen first by the guide
-because it has a current REST API, OAuth, contacts, opportunities and webhooks.
-Its verification checklist is already written in
-`services/migration/src/adapters/planned.ts`.
+The **Roofr connector** — the source actively being migrated for live clients,
+so it is the one whose absence costs onboarding time today.
+
+Before writing any of it: **read the existing migration scripts and n8n
+workflows.** They already move Roofr data for real onboardings and encode field
+mappings and export quirks found against real client exports. That knowledge
+belongs in the adapter, not rediscovered from scratch.
+
+HighLevel follows — it is where the API-first path (OAuth, webhooks, real
+timestamp delta sync) gets proven.
 
 A new connector inherits batching, checkpointing, retry, deduplication, file
-transfer, reconciliation, reporting, the wizard endpoints, the admin console and
-tenant isolation. It only has to earn authentication, discovery, extraction and
-field mapping.
+transfer, reconciliation, reporting, the two-pass delivery model, the go-live
+checklist, the wizard endpoints, the admin console and tenant isolation. It only
+has to earn authentication, discovery, extraction and field mapping.
