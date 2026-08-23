@@ -146,6 +146,9 @@ export const ACCULYNX_SPEC: PlannedAdapterSpec = {
   ],
   documentation: ['AccuLynx - Getting Started', 'AccuLynx - API Integrations for Developers'],
   designNotes: [
+    'FIRST CONNECTOR TO BUILD. Working AccuLynx migration scripts already exist in-house and have run against real client accounts.',
+    'Read those scripts before writing anything. What to extract from them, in priority order: (1) the exact AccuLynx field names used per object, (2) the milestone/status value vocabulary observed in real accounts, (3) how multi-location credentials are handled, (4) pagination parameters and any rate limits hit in practice, (5) every edge case the script special-cases -- each one is a bug found the hard way.',
+    'Port that knowledge into normalize(), not into the platform. The scripts predate the canonical schema, so their output shape will not match; the mappings they encode are the valuable part, not their structure.',
     'Connection preflight must identify the company/location and record which endpoints answered (Guide §8.2).',
     'Documents download in bounded batches with MIME/size validation and hashing before upload (Guide §8.6).',
     'Throttle and back off explicitly; do not rely on n8n\'s automatic retry (Guide §8.4).',
@@ -296,8 +299,8 @@ export const ROOFR_SPEC: PlannedAdapterSpec = {
   designNotes: [
     'Reuses the generic file-ingestion components; Roofr export records become the same canonical objects as API adapters (Guide §11.6, §12).',
     'Mapping preview must show source field -> BuilderLync field, sample values, unmapped fields and validation errors before import (Guide §11.4).',
-    'FIRST CONNECTOR TO BUILD. Roofr is the source in active use for live client migrations, so working extraction here removes real onboarding effort immediately.',
-    'Existing migration scripts already move Roofr job data for onboarding. Review those before writing anything: they encode field mappings and quirks discovered against real client exports, which is knowledge no amount of documentation reading reproduces.',
+    'SECOND CONNECTOR, AND BLOCKED. Roofr is migrated by hand today, so automating it removes real recurring effort -- but no existing tooling covers it, so there is no reference mapping to start from.',
+    'BLOCKER: real sample Roofr exports are required before any parser can be written. Column headers, export variants and how file/photo archives reference their parent job cannot be inferred from documentation, and guessing them produces a parser that fails on the first real client file. Obtain sanitized exports of each type (contacts, jobs, and any file/photo archive) and add them to test/fixtures as contract tests.',
     'Export-based sources have no updated-at watermark, so the two-pass model (historical, then final delta before go-live) must be driven by re-uploading a fresh export and relying on content hashing to skip unchanged rows -- not by a timestamp filter.',
   ],
 };
@@ -306,14 +309,27 @@ export const ROOFR_SPEC: PlannedAdapterSpec = {
  * Build order.
  *
  * Guide §21 puts HighLevel first, on the reasoning that it has the most modern
- * API surface. Current delivery reality overrides that: Roofr is the source
- * actively being migrated for live clients, so it is the connector whose
- * absence costs onboarding time today. HighLevel remains the better *second*
- * connector for exactly the reason the guide gives -- OAuth, webhooks and delta
- * sync make it the right place to prove the API-first path.
+ * API surface. That reasoning is sound in the abstract, but it ranks connectors
+ * by how pleasant their API is rather than by what the team can actually
+ * finish.
+ *
+ * AccuLynx goes first because working migration scripts for it already exist
+ * in-house. That is the strongest de-risking signal available: those scripts
+ * encode field mappings, status vocabularies and multi-location credential
+ * handling that were discovered against real client accounts. Starting from a
+ * proven mapping beats starting from vendor documentation, and it is available
+ * today.
+ *
+ * Roofr is the source currently being migrated by hand, which argues for doing
+ * it early -- but there is no existing tooling for it, and it is export-based,
+ * so an adapter cannot be written without real sample exports to parse. It sits
+ * second, blocked on obtaining those files.
+ *
+ * HighLevel stays third and remains the right place to prove the full API-first
+ * path: OAuth, webhooks and genuine timestamp-based delta sync.
  */
 export const PLANNED_SPECS: readonly PlannedAdapterSpec[] = Object.freeze([
-  ROOFR_SPEC, HIGHLEVEL_SPEC, ACCULYNX_SPEC, JOBNIMBUS_SPEC, PROLINE_SPEC,
+  ACCULYNX_SPEC, ROOFR_SPEC, HIGHLEVEL_SPEC, JOBNIMBUS_SPEC, PROLINE_SPEC,
 ]);
 
 /**

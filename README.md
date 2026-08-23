@@ -145,15 +145,19 @@ docs/                   the documents above
 
 ## Next step
 
-The **Roofr connector** — the source actively being migrated for live clients,
-so it is the one whose absence costs onboarding time today.
+The **AccuLynx connector** — chosen because working migration scripts for it
+already exist in-house and have run against real client accounts. Starting from
+a mapping proven against live data beats starting from vendor documentation.
 
-Before writing any of it: **read the existing migration scripts and n8n
-workflows.** They already move Roofr data for real onboardings and encode field
-mappings and export quirks found against real client exports. That knowledge
-belongs in the adapter, not rediscovered from scratch.
+Before writing any of it: **read those scripts.** They encode field names,
+milestone vocabularies, multi-location credential handling and edge cases each
+found the hard way. That knowledge belongs in the adapter, not rediscovered.
 
-HighLevel follows — it is where the API-first path (OAuth, webhooks, real
+**Roofr** is second and currently **blocked**: it is migrated by hand today, but
+it is export-based and there is no existing tooling, so a parser cannot be
+written without real sample exports to work from.
+
+**HighLevel** follows — it is where the API-first path (OAuth, webhooks, real
 timestamp delta sync) gets proven.
 
 A new connector inherits batching, checkpointing, retry, deduplication, file
