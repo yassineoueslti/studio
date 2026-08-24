@@ -100,6 +100,8 @@ export interface OnboardingTask {
 export interface GoLiveReadiness {
   migration_id: string;
   ready: boolean;
+  /** False before the checklist exists. Distinguishes "not started" from "done". */
+  checklist_initialized: boolean;
   current_pass: PassType;
   /** Outstanding items that block go-live, in checklist order. */
   blockers: Array<{ task_key: string; label: string; category: string; status: string }>;
@@ -204,6 +206,12 @@ export class OnboardingService {
       .filter((t) => t.blocks_go_live && t.status !== 'DONE' && t.status !== 'NOT_APPLICABLE')
       .map((t) => ({ task_key: t.task_key, label: t.label, category: t.category, status: t.status }));
 
+    // A migration with no checklist has not been through onboarding at all, so
+    // it has zero blockers -- and reporting "ready" on that basis would tell an
+    // onboarding specialist a client is clear to go live before anyone has
+    // looked at them. An empty checklist means uninitialized, not finished.
+    const checklistInitialized = tasks.length > 0;
+
     const slaDays = migration.onboarding_sla_days ?? 30;
     const startedAt = migration.started_at ?? migration.created_at ?? null;
     const dueAt = startedAt ? new Date(startedAt.getTime() + slaDays * 86_400_000) : null;
@@ -211,7 +219,8 @@ export class OnboardingService {
 
     return {
       migration_id: migrationId,
-      ready: blockers.length === 0,
+      ready: checklistInitialized && blockers.length === 0,
+      checklist_initialized: checklistInitialized,
       current_pass: (migration.current_pass as PassType) ?? 'HISTORICAL',
       blockers,
       tasks,
@@ -227,7 +236,7 @@ export class OnboardingService {
         days_remaining: daysRemaining,
         // Only an unfinished migration can breach: one that shipped inside the
         // window does not retroactively breach as the calendar moves on.
-        breached: dueAt !== null && Date.now() > dueAt.getTime() && blockers.length > 0,
+        breached: dueAt !== null && Date.now() > dueAt.getTime() && !(checklistInitialized && blockers.length === 0),
       },
       passes,
     };

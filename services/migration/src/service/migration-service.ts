@@ -244,32 +244,48 @@ export class MigrationService {
     // Selecting jobs without contacts silently orphans every job, so it is
     // named here rather than discovered in the relationship reconciliation.
     //
-    // Only dependencies the *source can actually provide* are blocking. A job
-    // depending on status_definition is not a customer error when the source
-    // has no status_definition object to offer -- that is a known capability
-    // limit, reported as context rather than as something to go fix.
-    const gaps = missingDependencies(selected)
-      .map((gap) => ({
-        entity: gap.entity,
-        actionable: gap.missing.filter((dep) => supports(adapter.capabilities, dep)),
-        unavailable: gap.missing.filter((dep) => !supports(adapter.capabilities, dep)),
-      }))
-      .filter((gap) => gap.actionable.length > 0 || gap.unavailable.length > 0);
+    // Only STRUCTURAL dependencies block. A contact carries its tag names and
+    // custom-field values inline, so migrating contacts without the tag and
+    // custom-field definitions costs metadata fidelity in BuilderLync's UI, not
+    // record correctness -- blocking on it would fail the most obvious first
+    // migration anyone tries.
+    //
+    // A dependency the source cannot provide at all is not blocking either:
+    // that is a known capability limit, not something the customer can fix.
+    const gaps = missingDependencies(selected).map((gap) => ({
+      entity: gap.entity,
+      blocking: gap.missingRequired.filter((dep) => supports(adapter.capabilities, dep)),
+      unavailable: gap.missingRequired.filter((dep) => !supports(adapter.capabilities, dep)),
+      advisory: gap.missingEnrichment.filter((dep) => supports(adapter.capabilities, dep)),
+    }));
 
-    const actionableGaps = gaps.filter((g) => g.actionable.length > 0);
-    const unavailableNote = gaps
-      .filter((g) => g.unavailable.length > 0)
-      .map((g) => `${g.entity} normally links to ${g.unavailable.join(', ')}, which ${adapter.platform} does not expose`)
-      .join('; ');
+    const blocking = gaps.filter((g) => g.blocking.length > 0);
+    const advisory = gaps.filter((g) => g.advisory.length > 0);
+    const unavailable = gaps.filter((g) => g.unavailable.length > 0);
+
+    const notes: string[] = [];
+    if (advisory.length > 0) {
+      notes.push(
+        `Metadata only: ${advisory
+          .map((g) => `${g.entity} references ${g.advisory.join(', ')}`)
+          .join('; ')}. These values still migrate on the records themselves.`,
+      );
+    }
+    if (unavailable.length > 0) {
+      notes.push(
+        `Source capability limits: ${unavailable
+          .map((g) => `${g.entity} normally links to ${g.unavailable.join(', ')}, which ${adapter.platform} does not expose`)
+          .join('; ')}.`,
+      );
+    }
 
     checks.push({
       name: 'entity_dependencies',
-      passed: actionableGaps.length === 0,
-      detail: actionableGaps.length > 0
-        ? actionableGaps.map((g) => `${g.entity} depends on unselected ${g.actionable.join(', ')}`).join('; ')
-        : unavailableNote
-          ? `All selectable dependencies are selected. Source capability limits: ${unavailableNote}.`
-          : 'All selected entities have their dependencies selected.',
+      passed: blocking.length === 0,
+      detail: blocking.length > 0
+        ? `${blocking.map((g) => `${g.entity} requires unselected ${g.blocking.join(', ')}`).join('; ')}. ` +
+          'Records would be orphaned without these.'
+        : ['All required dependencies are selected.', ...notes].join(' '),
     });
 
     checks.push({

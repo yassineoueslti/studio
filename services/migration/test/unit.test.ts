@@ -215,16 +215,47 @@ describe('entity sequencing (Scope §14)', () => {
     expect(ordered).toEqual(['user', 'contact', 'job']);
   });
 
-  it('reports dependencies the customer left unselected', () => {
+  it('separates structural gaps that orphan records from metadata-only gaps', () => {
     const gaps = missingDependencies(['job']);
     const jobGap = gaps.find((g) => g.entity === 'job');
-    expect(jobGap?.missing).toContain('contact');
-    expect(jobGap?.missing).toContain('user');
+
+    // A job stores contact_id: without contacts it is genuinely orphaned.
+    expect(jobGap?.missingRequired).toContain('contact');
+    // A job stores its status and tags as values, so their definitions are
+    // metadata fidelity, not correctness.
+    expect(jobGap?.missingEnrichment).toContain('status_definition');
+    expect(jobGap?.missingEnrichment).toContain('user');
+    expect(jobGap?.missingRequired).not.toContain('user');
   });
 
-  it('reports no gaps when the full chain is selected', () => {
+  it('treats the obvious first selection as structurally complete', () => {
+    // "users, contacts, jobs" is what anyone tries first. It must not be
+    // blocked for missing tag and custom-field definitions.
+    const gaps = missingDependencies(['user', 'contact', 'job']);
+    for (const gap of gaps) {
+      expect(gap.missingRequired, `${gap.entity} should have no structural gap`).toHaveLength(0);
+    }
+  });
+
+  it('satisfies a polymorphic parent when any one option is selected', () => {
+    // A note attaches to a contact or a job; selecting either is enough.
+    const withContact = missingDependencies(['contact', 'note']).find((g) => g.entity === 'note');
+    expect(withContact?.missingRequired ?? []).toHaveLength(0);
+
+    const withJob = missingDependencies(['contact', 'job', 'note']).find((g) => g.entity === 'note');
+    expect(withJob?.missingRequired ?? []).toHaveLength(0);
+
+    // Selecting neither leaves the note with nothing to attach to.
+    const orphaned = missingDependencies(['note']).find((g) => g.entity === 'note');
+    expect(orphaned?.missingRequired.length).toBeGreaterThan(0);
+  });
+
+  it('reports no gaps at all when the full chain is selected', () => {
     const selected = ['account', 'user', 'tag', 'custom_field', 'status_definition', 'contact', 'job'] as const;
-    expect(missingDependencies([...selected])).toHaveLength(0);
+    for (const gap of missingDependencies([...selected])) {
+      expect(gap.missingRequired).toHaveLength(0);
+      expect(gap.missingEnrichment).toHaveLength(0);
+    }
   });
 });
 

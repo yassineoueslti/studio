@@ -44,46 +44,105 @@ export interface EntityPlan {
   readonly order: number;
   readonly phase: MigrationPhase;
   /**
-   * Entities that must be accounted for before this one runs. The orchestrator
-   * uses this both to sequence work and to raise DEPENDENCY_MISSING rather than
-   * writing an orphan record.
+   * STRUCTURAL parents. The record stores a reference to these, so a missing
+   * one leaves an orphan -- a job with no contact_id. Not selecting these is a
+   * real error, and preflight blocks on it.
    */
-  readonly dependsOn: readonly EntityType[];
+  readonly requires: readonly EntityType[];
+  /**
+   * Polymorphic structural parents, of which AT LEAST ONE must be present.
+   * A note attaches to a contact or a job, so requiring both would falsely
+   * block a migration that only selected one of them.
+   */
+  readonly requiresAny: readonly EntityType[];
+  /**
+   * DEFINITIONAL parents. The record stores the *value*, not a reference to
+   * these -- a contact carries its tag names and custom-field values inline, so
+   * it is complete whether or not the tag and custom-field definitions were
+   * migrated. Missing ones cost metadata fidelity in the destination UI, not
+   * record correctness, so preflight reports them rather than blocking.
+   *
+   * Conflating these two kinds of dependency is what made selecting
+   * "user, contact, job" -- the obvious first migration -- fail preflight for a
+   * problem that does not exist.
+   */
+  readonly enrichedBy: readonly EntityType[];
   /** Assets move through the file pipeline, not the record batch pipeline. */
   readonly isAsset: boolean;
+  /**
+   * Every dependency, in any category. Sequencing uses this: an entity must
+   * still run after anything it references, structurally or not, so that
+   * inline values and resolved ids are both available.
+   */
+  readonly dependsOn: readonly EntityType[];
+}
+
+type EntityPlanInput = Omit<EntityPlan, 'dependsOn' | 'requires' | 'requiresAny' | 'enrichedBy'> & {
+  requires?: readonly EntityType[];
+  requiresAny?: readonly EntityType[];
+  enrichedBy?: readonly EntityType[];
+};
+
+function plan(input: EntityPlanInput): EntityPlan {
+  const requires = input.requires ?? [];
+  const requiresAny = input.requiresAny ?? [];
+  const enrichedBy = input.enrichedBy ?? [];
+  return {
+    ...input,
+    requires,
+    requiresAny,
+    enrichedBy,
+    dependsOn: [...new Set([...requires, ...requiresAny, ...enrichedBy])],
+  };
 }
 
 export const ENTITY_PLAN: readonly EntityPlan[] = Object.freeze([
   // Phase A - Foundation
-  { entity: 'account', order: 1, phase: 'FOUNDATION', dependsOn: [], isAsset: false },
-  { entity: 'location', order: 2, phase: 'FOUNDATION', dependsOn: ['account'], isAsset: false },
-  { entity: 'user', order: 3, phase: 'FOUNDATION', dependsOn: ['account'], isAsset: false },
-  { entity: 'team', order: 4, phase: 'FOUNDATION', dependsOn: ['user'], isAsset: false },
-  { entity: 'custom_field', order: 5, phase: 'FOUNDATION', dependsOn: ['account'], isAsset: false },
-  { entity: 'tag', order: 6, phase: 'FOUNDATION', dependsOn: ['account'], isAsset: false },
-  { entity: 'pipeline', order: 7, phase: 'FOUNDATION', dependsOn: ['account'], isAsset: false },
-  { entity: 'pipeline_stage', order: 8, phase: 'FOUNDATION', dependsOn: ['pipeline'], isAsset: false },
-  { entity: 'status_definition', order: 9, phase: 'FOUNDATION', dependsOn: ['account'], isAsset: false },
+  plan({ entity: 'account', order: 1, phase: 'FOUNDATION', isAsset: false }),
+  plan({ entity: 'location', order: 2, phase: 'FOUNDATION', requires: ['account'], isAsset: false }),
+  plan({ entity: 'user', order: 3, phase: 'FOUNDATION', enrichedBy: ['account'], isAsset: false }),
+  plan({ entity: 'team', order: 4, phase: 'FOUNDATION', requires: ['user'], isAsset: false }),
+  plan({ entity: 'custom_field', order: 5, phase: 'FOUNDATION', enrichedBy: ['account'], isAsset: false }),
+  plan({ entity: 'tag', order: 6, phase: 'FOUNDATION', enrichedBy: ['account'], isAsset: false }),
+  plan({ entity: 'pipeline', order: 7, phase: 'FOUNDATION', enrichedBy: ['account'], isAsset: false }),
+  // A stage without its pipeline is genuinely orphaned: it stores pipeline_id.
+  plan({ entity: 'pipeline_stage', order: 8, phase: 'FOUNDATION', requires: ['pipeline'], isAsset: false }),
+  plan({ entity: 'status_definition', order: 9, phase: 'FOUNDATION', enrichedBy: ['account'], isAsset: false }),
 
   // Phase B - CRM Data
-  { entity: 'contact', order: 10, phase: 'CRM_DATA', dependsOn: ['user', 'tag', 'custom_field'], isAsset: false },
-  { entity: 'company', order: 11, phase: 'CRM_DATA', dependsOn: ['user'], isAsset: false },
-  { entity: 'lead', order: 12, phase: 'CRM_DATA', dependsOn: ['contact'], isAsset: false },
-  { entity: 'opportunity', order: 13, phase: 'CRM_DATA', dependsOn: ['contact', 'pipeline_stage', 'user'], isAsset: false },
+  // A contact stands alone. Its assignee, tags and custom fields are attributes:
+  // losing them degrades the record, it does not orphan it.
+  plan({ entity: 'contact', order: 10, phase: 'CRM_DATA', enrichedBy: ['user', 'tag', 'custom_field'], isAsset: false }),
+  plan({ entity: 'company', order: 11, phase: 'CRM_DATA', enrichedBy: ['user'], isAsset: false }),
+  plan({ entity: 'lead', order: 12, phase: 'CRM_DATA', requires: ['contact'], isAsset: false }),
+  plan({
+    entity: 'opportunity', order: 13, phase: 'CRM_DATA',
+    requires: ['contact'],
+    // An unstaged opportunity is still a real opportunity; Scope §39 lists
+    // "opportunities without pipelines" as something to report, not to reject.
+    enrichedBy: ['pipeline', 'pipeline_stage', 'user'],
+    isAsset: false,
+  }),
 
   // Phase C - Operational Data
-  { entity: 'job', order: 14, phase: 'OPERATIONAL', dependsOn: ['contact', 'user', 'status_definition'], isAsset: false },
-  { entity: 'job_assignment', order: 15, phase: 'OPERATIONAL', dependsOn: ['job', 'user'], isAsset: false },
-  { entity: 'contact_job_relationship', order: 16, phase: 'OPERATIONAL', dependsOn: ['job', 'contact'], isAsset: false },
-  { entity: 'task', order: 17, phase: 'OPERATIONAL', dependsOn: ['contact', 'user'], isAsset: false },
-  { entity: 'appointment', order: 18, phase: 'OPERATIONAL', dependsOn: ['contact', 'user'], isAsset: false },
-  { entity: 'note', order: 19, phase: 'OPERATIONAL', dependsOn: ['contact', 'job'], isAsset: false },
-  { entity: 'activity', order: 20, phase: 'OPERATIONAL', dependsOn: ['contact', 'job', 'user'], isAsset: false },
+  plan({
+    entity: 'job', order: 14, phase: 'OPERATIONAL',
+    requires: ['contact'],
+    enrichedBy: ['user', 'status_definition', 'tag'],
+    isAsset: false,
+  }),
+  plan({ entity: 'job_assignment', order: 15, phase: 'OPERATIONAL', requires: ['job', 'user'], isAsset: false }),
+  plan({ entity: 'contact_job_relationship', order: 16, phase: 'OPERATIONAL', requires: ['job', 'contact'], isAsset: false }),
+  plan({ entity: 'task', order: 17, phase: 'OPERATIONAL', requiresAny: ['contact', 'job'], enrichedBy: ['user'], isAsset: false }),
+  plan({ entity: 'appointment', order: 18, phase: 'OPERATIONAL', requiresAny: ['contact', 'job'], enrichedBy: ['user'], isAsset: false }),
+  // Notes and activities attach to whichever parent the source gave them.
+  plan({ entity: 'note', order: 19, phase: 'OPERATIONAL', requiresAny: ['contact', 'job'], enrichedBy: ['user'], isAsset: false }),
+  plan({ entity: 'activity', order: 20, phase: 'OPERATIONAL', requiresAny: ['contact', 'job'], enrichedBy: ['user'], isAsset: false }),
 
   // Phase D - Assets
-  { entity: 'document', order: 21, phase: 'ASSETS', dependsOn: ['job', 'contact'], isAsset: true },
-  { entity: 'image', order: 22, phase: 'ASSETS', dependsOn: ['job', 'contact'], isAsset: true },
-  { entity: 'attachment', order: 23, phase: 'ASSETS', dependsOn: ['job', 'contact', 'note'], isAsset: true },
+  plan({ entity: 'document', order: 21, phase: 'ASSETS', requiresAny: ['job', 'contact'], isAsset: true }),
+  plan({ entity: 'image', order: 22, phase: 'ASSETS', requiresAny: ['job', 'contact'], isAsset: true }),
+  plan({ entity: 'attachment', order: 23, phase: 'ASSETS', requiresAny: ['job', 'contact', 'note'], isAsset: true }),
 ]);
 
 const PLAN_BY_ENTITY = new Map<EntityType, EntityPlan>(ENTITY_PLAN.map((p) => [p.entity, p]));
@@ -108,20 +167,41 @@ export function sequence(selected: readonly EntityType[]): EntityPlan[] {
   return ENTITY_PLAN.filter((p) => wanted.has(p.entity)).sort((a, b) => a.order - b.order);
 }
 
-/**
- * Dependencies of `selected` that were not themselves selected. Surfaced by
- * preflight so the customer is warned before, not during, a migration --
- * e.g. selecting jobs without contacts orphans every job.
- */
-export function missingDependencies(selected: readonly EntityType[]): Array<{
+export interface DependencyGap {
   entity: EntityType;
-  missing: EntityType[];
-}> {
+  /** Structural parents not selected. These orphan records; preflight blocks. */
+  missingRequired: EntityType[];
+  /** Definitional parents not selected. Metadata fidelity only; advisory. */
+  missingEnrichment: EntityType[];
+}
+
+/**
+ * Dependencies of `selected` that were not themselves selected, split by
+ * whether their absence breaks records or merely degrades them.
+ *
+ * Surfaced by preflight so the customer is warned before, not during, a
+ * migration -- selecting jobs without contacts orphans every job, while
+ * selecting contacts without tags just means tag definitions do not appear in
+ * BuilderLync's tag manager.
+ */
+export function missingDependencies(selected: readonly EntityType[]): DependencyGap[] {
   const wanted = new Set(selected);
-  const gaps: Array<{ entity: EntityType; missing: EntityType[] }> = [];
-  for (const plan of sequence(selected)) {
-    const missing = plan.dependsOn.filter((dep) => !wanted.has(dep));
-    if (missing.length > 0) gaps.push({ entity: plan.entity, missing });
+  const gaps: DependencyGap[] = [];
+
+  for (const entityPlan of sequence(selected)) {
+    const missingRequired = entityPlan.requires.filter((dep) => !wanted.has(dep));
+
+    // requiresAny is satisfied by any one of its options, so it only counts as
+    // missing when none were selected.
+    if (entityPlan.requiresAny.length > 0 && !entityPlan.requiresAny.some((dep) => wanted.has(dep))) {
+      missingRequired.push(...entityPlan.requiresAny);
+    }
+
+    const missingEnrichment = entityPlan.enrichedBy.filter((dep) => !wanted.has(dep));
+
+    if (missingRequired.length > 0 || missingEnrichment.length > 0) {
+      gaps.push({ entity: entityPlan.entity, missingRequired, missingEnrichment });
+    }
   }
   return gaps;
 }

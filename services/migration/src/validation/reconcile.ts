@@ -5,6 +5,7 @@ import type { DestinationClient, RelationshipIntegrityReport } from '../destinat
 import type { EntityType } from '../domain/entities.js';
 import { fileCounts } from '../files/transfer.js';
 import { getPool } from '../db/pool.js';
+import * as migrationsRepo from '../db/repositories/migrations.js';
 
 /**
  * Validation and reconciliation (Guide §17, Scope §37-39).
@@ -43,6 +44,12 @@ export interface DiscoveryReconciliation {
   ledgerDiscovered: number;
   variance: number;
   passed: boolean;
+  /**
+   * 'reconciled'   the customer selected this entity, so the counts must agree
+   * 'not_selected' discovered at the source but deliberately excluded from the
+   *                migration; reported for transparency, never a defect
+   */
+  status: 'reconciled' | 'not_selected';
   note?: string;
 }
 
@@ -102,6 +109,10 @@ export async function reconcile(
       countJobsContactlessAtSource(tenantId, migrationId),
     ]);
 
+  const migration = await migrationsRepo.getMigration(getPool(), tenantId, migrationId);
+  const selectedEntities = (migration?.configuration_json?.selectedEntities as EntityType[] | undefined) ?? [];
+  const selection = new Set(selectedEntities);
+
   // --- Step 17.1: count reconciliation ------------------------------------
   const counts: CountReconciliation[] = ledgerCounts.map((row) => {
     const accountedFor = row.created + row.updated + row.merged + row.skipped + row.unsupported + row.failed;
@@ -127,12 +138,35 @@ export async function reconcile(
   // extracted is a real defect (a silently truncated page), and it is invisible
   // to the equation above -- which balances perfectly over whatever was
   // extracted. Comparing against the discovery scan is what catches it.
+  //
+  // Only entities the customer SELECTED are reconciled. Discovery deliberately
+  // scans the whole source so the customer can see everything available
+  // (Scope §15), and the wizard then lets them choose a subset (Scope §32
+  // step 4). Counting an unselected entity as missing would treat that choice
+  // as data loss and permanently block completion for every partial migration
+  // -- which is the normal case, not the exception.
   const ledgerByEntity = new Map(ledgerCounts.map((r) => [r.entity_type, r.discovered]));
   const discovery: DiscoveryReconciliation[] = discoveryRows
     .filter((row) => row.supported && row.discovered_count > 0)
     .map((row) => {
       const ledgerDiscovered = ledgerByEntity.get(row.entity_type) ?? 0;
       const variance = row.discovered_count - ledgerDiscovered;
+
+      // An empty selection means "everything the adapter supports".
+      const wasSelected = selection.size === 0 || selection.has(row.entity_type);
+
+      if (!wasSelected) {
+        return {
+          entity: row.entity_type,
+          sourceDiscovered: row.discovered_count,
+          ledgerDiscovered,
+          variance,
+          passed: true,
+          status: 'not_selected' as const,
+          note: `${row.discovered_count} record(s) exist at the source but this entity was not selected for migration.`,
+        };
+      }
+
       return {
         entity: row.entity_type,
         sourceDiscovered: row.discovered_count,
@@ -141,6 +175,7 @@ export async function reconcile(
         // Extracting *more* than discovery predicted is normal (records added
         // at the source mid-migration). Extracting fewer is not.
         passed: variance <= 0,
+        status: 'reconciled' as const,
         ...(variance > 0
           ? { note: `${variance} record(s) reported by discovery were never extracted.` }
           : {}),

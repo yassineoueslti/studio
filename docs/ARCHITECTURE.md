@@ -156,6 +156,44 @@ alone balances perfectly over whatever was extracted, so it cannot detect a
 silently truncated page; comparing against what discovery said the source held
 can.
 
+## Two kinds of dependency
+
+Entity dependencies are not all the same, and conflating them produces false
+blockers:
+
+| Kind | Example | Missing means | Preflight |
+|---|---|---|---|
+| **Structural** (`requires`) | `job → contact` | The record stores a reference. Absent ⇒ orphan | **Blocks** |
+| **Polymorphic** (`requiresAny`) | `note → contact OR job` | Needs at least one parent to attach to | **Blocks** if none selected |
+| **Definitional** (`enrichedBy`) | `contact → tag` | The record stores the *value* inline. Absent ⇒ the definition is missing from BuilderLync's UI, the data is not | Reports |
+
+A contact carries its tag names and custom-field values on the record itself, so
+it is complete whether or not the tag and custom-field *definitions* were
+migrated. Treating that as a blocker made the most obvious first migration
+anyone tries — users, contacts, jobs — fail preflight for a problem that does
+not exist.
+
+Sequencing still uses the union of all three: an entity must run after anything
+it references, so that inline values and resolved ids are both available.
+
+## Discovery reconciliation and partial selection
+
+Discovery deliberately scans the **whole** source, so the customer can see
+everything available before choosing. The wizard then lets them migrate a
+subset.
+
+Reconciliation therefore compares discovery against the ledger **only for
+entities the customer selected**. An unselected entity is reported with status
+`not_selected` — visible in the report, never counted as a variance. Counting it
+as missing would treat a deliberate choice as data loss and permanently block
+completion for every partial migration, which is the normal case rather than the
+exception.
+
+Entities that *were* selected are still reconciled strictly: extracting fewer
+records than discovery found is a silently truncated page, and it is the one
+defect the accounted-for equation cannot see, because that equation balances
+perfectly over whatever was extracted.
+
 ## Relationship reconciliation
 
 Reconciliation separates two things that look identical in the destination:

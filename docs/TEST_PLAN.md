@@ -27,14 +27,14 @@ Additional coverage beyond the eleven:
 
 | Area | Tests | File |
 |---|---|---|
-| Normalization, hashing, state machines, retry, rate limiting, fuzzy matching, canonical validation | 39 | `unit.test.ts` |
+| Normalization, hashing, state machines, dependency classification, retry, rate limiting, fuzzy matching, canonical validation | 41 | `unit.test.ts` |
 | n8n boundary: checkpoint round-trip, worker error intake, auth, payload tenant spoofing | 4 | `n8n-integration.test.ts` |
 | n8n workflow JSON: structural validity, endpoint agreement, error routing, source-logic isolation | 11 | `n8n-integration.test.ts` |
 | Migration API lifecycle over HTTP, per-record batch results, webhook deduplication | 4 | `production-readiness.test.ts` |
 | Pause / cancel / concurrency: operator intent survives the run's error path; two runs cannot race | 5 | `lifecycle-control.test.ts` |
-| Two-pass delivery: historical then final delta, go-live blockers, 30-day SLA | 6 | `two-pass-onboarding.test.ts` |
+| Two-pass delivery, partial entity selection, go-live blockers, 30-day SLA | 9 | `two-pass-onboarding.test.ts` |
 
-**84 tests total.**
+**89 tests total.**
 
 ## What these tests deliberately do *not* mock
 

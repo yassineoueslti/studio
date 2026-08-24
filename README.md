@@ -38,7 +38,7 @@ $ pnpm demo
 SPRINT 1 ACCEPTANCE: PASSED
 ```
 
-**84 tests pass**, including all eleven of Guide §20's named
+**89 tests pass**, including all eleven of Guide §20's named
 production-readiness tests.
 
 The five launch connectors — GoHighLevel, AccuLynx, JobNimbus, ProLine, Roofr —
@@ -57,7 +57,7 @@ openssl rand -base64 32          # → MIGRATION_SECRET_KEY in .env
 pnpm install
 pnpm db:migrate
 
-pnpm test     # 84 tests
+pnpm test     # 89 tests
 pnpm demo     # Sprint 1 acceptance run
 pnpm dev      # API on :3001
 ```
@@ -135,7 +135,7 @@ services/migration/     the migration service (Guide §22)
   src/pipeline/         orchestrator, retry, rate limiting
   src/dedupe/           confidence-tier matching
   src/validation/       reconciliation
-  test/                 84 tests
+  test/                 89 tests
   scripts/              Sprint 1 acceptance run
 n8n/workflows/          MIG-001, MIG-100, MIG-140, MIG-900
 docs/                   the documents above

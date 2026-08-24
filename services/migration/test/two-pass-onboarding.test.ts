@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { MockAdapter } from '../src/adapters/mock/index.js';
-import { countTable, createHarness, resetDatabase, setupSchema, teardown } from './helpers.js';
+import { countTable, createHarness, getPool, resetDatabase, setupSchema, teardown } from './helpers.js';
 
 /**
  * The two-pass delivery model agreed at the Aug 21 meeting.
@@ -102,7 +102,82 @@ describe('two-pass migration', () => {
   });
 });
 
+describe('partial entity selection', () => {
+  it('completes when the customer selected only some of the available entities', async () => {
+    // Discovery scans the whole source, but the customer picked a subset. The
+    // unselected entities are a deliberate choice, not data loss -- treating
+    // them as missing would block completion for every partial migration,
+    // which is the normal case rather than the exception.
+    const harness = createHarness({ contacts: 40, jobs: 10, seed: 'partial', duplicateRate: 0 });
+
+    const migration = await harness.service.create(harness.principal, {
+      sourcePlatform: 'mock',
+      configuration: { selectedEntities: ['user', 'contact', 'job'] },
+    });
+    await harness.service.discover(harness.principal, migration.id);
+    await harness.service.start(harness.principal, migration.id, { skipPreflight: true });
+
+    const report = await harness.service.validate(harness.principal, migration.id);
+
+    expect(report.blockingReasons).toEqual([]);
+    expect(report.overallPassed).toBe(true);
+
+    // Tags and pipelines exist at the source and were not selected. They are
+    // still reported, so nothing is hidden -- just not counted as a defect.
+    const notSelected = report.discovery.filter((d) => d.status === 'not_selected');
+    expect(notSelected.map((d) => d.entity)).toContain('tag');
+    for (const row of notSelected) {
+      expect(row.passed).toBe(true);
+      expect(row.note).toMatch(/not selected/i);
+    }
+
+    // The entities that WERE selected are still strictly reconciled.
+    const reconciled = report.discovery.filter((d) => d.status === 'reconciled');
+    expect(reconciled.map((d) => d.entity)).toContain('contact');
+    for (const row of reconciled) expect(row.passed).toBe(true);
+
+    const status = await harness.service.get(harness.principal, migration.id);
+    expect(['COMPLETED', 'COMPLETED_WITH_WARNINGS']).toContain(status.status);
+  });
+
+  it('still catches a genuinely truncated extraction for a selected entity', async () => {
+    const harness = createHarness({ contacts: 30, jobs: 0, seed: 'truncated' });
+    const migration = await harness.service.create(harness.principal, {
+      sourcePlatform: 'mock', configuration: { selectedEntities: ['contact'] },
+    });
+    await harness.service.discover(harness.principal, migration.id);
+    await harness.service.start(harness.principal, migration.id, { skipPreflight: true });
+
+    // Inflate the recorded discovery count to simulate a page that was
+    // silently dropped during extraction.
+    await getPool().query(
+      `UPDATE migration_discovery SET discovered_count = discovered_count + 5
+        WHERE migration_id = $1 AND entity_type = 'contact'`,
+      [migration.id],
+    );
+
+    const report = await harness.service.validate(harness.principal, migration.id);
+    expect(report.overallPassed).toBe(false);
+    expect(report.blockingReasons.join(' ')).toMatch(/contact.*never extracted|discovery found/i);
+  });
+});
+
 describe('go-live readiness', () => {
+  it('is not ready before the checklist exists', async () => {
+    const harness = createHarness({ contacts: 5, jobs: 0, seed: 'uninitialized' });
+    const migration = await harness.service.create(harness.principal, {
+      sourcePlatform: 'mock', configuration: { selectedEntities: ['contact'] },
+    });
+
+    // No checklist yet means zero blockers. Reporting "ready" on that basis
+    // would clear a client for go-live before anyone had looked at them.
+    const readiness = await harness.service.onboarding.goLiveReadiness(harness.principal, migration.id);
+    expect(readiness.checklist_initialized).toBe(false);
+    expect(readiness.blockers).toHaveLength(0);
+    expect(readiness.ready).toBe(false);
+    expect(readiness.sla.breached).toBe(false);
+  });
+
   it('names what is blocking go-live instead of just saying "not ready"', async () => {
     const harness = createHarness({ contacts: 50, jobs: 10, seed: 'readiness' });
     const migration = await harness.service.create(harness.principal, {
