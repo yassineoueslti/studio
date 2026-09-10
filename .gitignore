@@ -9,3 +9,6 @@ tmp/
 storage/
 *.log
 .pgdata/
+
+# Git bundles used to hand the repo over out-of-band; never a repo member.
+*.bundle
