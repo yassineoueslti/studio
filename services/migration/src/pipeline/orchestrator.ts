@@ -188,7 +188,22 @@ export class Orchestrator {
         }),
       );
 
-      if (page.records.length === 0 && !page.hasMore) break;
+      // Terminate on an empty page even when the adapter still claims hasMore.
+      //
+      // A pagination bug that reports "more available" while returning nothing
+      // would otherwise spin until the process died, leaving a half-written
+      // migration and no diagnosis. Stopping is always safe: reconciliation
+      // compares the ledger against the discovery scan, so anything genuinely
+      // missed surfaces as a variance with the entity named.
+      if (page.records.length === 0) {
+        if (page.hasMore) {
+          log.warn('Source reported more records available but returned an empty page; stopping extraction', {
+            batch_id: String(batchNumber),
+            records_processed: recordsProcessed,
+          });
+        }
+        break;
+      }
 
       batchNumber += 1;
       await this.processBatch(context, entity, page.records, batchNumber, cursor, log);
@@ -418,7 +433,36 @@ export class Orchestrator {
       const hashBySourceId = new Map(writable.map((w) => [w.sourceId, w.hash]));
       const updatedAtBySourceId = new Map(writable.map((w) => [w.sourceId, w.sourceUpdatedAt]));
 
-      for (const result of response.results) {
+      // Scope §44: every record sent must come back. Checked here rather than
+      // only in the HTTP driver, so the guarantee holds for every destination
+      // implementation including the in-process one. A short response would
+      // otherwise surface hours later as a reconciliation variance with no
+      // traceable cause.
+      const sentIds = new Set(writable.map((w) => w.sourceId));
+      const returnedIds = new Set(response.results.map((r) => r.source_id));
+      const omitted = writable.filter((w) => !returnedIds.has(w.sourceId));
+      if (omitted.length > 0) {
+        throw new MigrationError(
+          'BUILDERLYNC_API_ERROR',
+          `Destination returned ${response.results.length} results for ${writable.length} records; ` +
+            `${omitted.length} unaccounted for (first: ${omitted[0]?.sourceId}).`,
+          { entity, migrationId: context.migrationId, batchId: batch.id },
+        );
+      }
+
+      // And results for records we never sent are discarded rather than
+      // written. Trusting them would put a fabricated mapping in the object
+      // map, so support would later trace a real BuilderLync id to nothing.
+      const phantom = response.results.filter((r) => !sentIds.has(r.source_id));
+      if (phantom.length > 0) {
+        log.warn('Destination returned results for records that were never sent; ignoring them', {
+          count: phantom.length,
+          first: phantom[0]?.source_id,
+        });
+      }
+      const accepted = response.results.filter((r) => sentIds.has(r.source_id));
+
+      for (const result of accepted) {
         const state = mergeTargets.has(result.source_id) && result.status === 'UPDATED'
           ? ('MERGED' as RecordState)
           : (result.status as RecordState);
@@ -450,7 +494,7 @@ export class Orchestrator {
 
       // Update the object map for everything the destination accepted.
       await withTransaction(async (client) => {
-        for (const result of response.results) {
+        for (const result of accepted) {
           if (!result.builderlync_id) continue;
           await recordsRepo.upsertObjectMap(client, {
             migrationId: context.migrationId,

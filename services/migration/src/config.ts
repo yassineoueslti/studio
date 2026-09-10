@@ -49,6 +49,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (config.DESTINATION_DRIVER === 'sandbox') {
       throw new Error('DESTINATION_DRIVER=sandbox is a development/test stand-in and must not run in production.');
     }
+    if (config.DESTINATION_DRIVER === 'http' && !config.BUILDERLYNC_API_BASE_URL.startsWith('https://')) {
+      throw new Error('BUILDERLYNC_API_BASE_URL must be https:// in production (Guide §19: TLS for every call).');
+    }
+  }
+
+  // Validate the key's SHAPE at startup, not on first use.
+  //
+  // Encryption only happens when a customer connects a source, which can be
+  // hours after deploy. A wrong-length key previously let the service boot
+  // healthy, pass its health check, take traffic, and then fail the first
+  // connection attempt with a generic 500 -- the worst possible time and the
+  // least useful signal. A misconfigured deploy should refuse to start.
+  if (config.MIGRATION_SECRET_KEY) {
+    const decoded = Buffer.from(config.MIGRATION_SECRET_KEY, 'base64');
+    if (decoded.byteLength !== 32) {
+      throw new Error(
+        `MIGRATION_SECRET_KEY must be exactly 32 bytes when base64-decoded, but decoded to ` +
+          `${decoded.byteLength}. Generate a valid key with: openssl rand -base64 32`,
+      );
+    }
   }
 
   return config;

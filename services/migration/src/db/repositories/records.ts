@@ -314,9 +314,23 @@ export async function registerDiscovered(
   const retentionDays = config().RAW_PAYLOAD_RETENTION_DAYS;
   const expiresAt = retentionDays > 0 ? new Date(Date.now() + retentionDays * 86_400_000) : null;
 
+  // Collapse repeats before the multi-row insert.
+  //
+  // Postgres rejects an INSERT ... ON CONFLICT DO UPDATE whose VALUES touch the
+  // same conflict target twice ("cannot affect row a second time"), so a source
+  // that serves one record twice in a page would abort the entire migration
+  // with a raw database error. Vendor APIs do exactly this when rows are
+  // inserted underneath a paginating reader and the offset shifts.
+  const seen = new Set<string>();
+  const unique = input.records.filter((record) => {
+    if (seen.has(record.sourceId)) return false;
+    seen.add(record.sourceId);
+    return true;
+  });
+
   const values: unknown[] = [];
   const tuples: string[] = [];
-  input.records.forEach((record, i) => {
+  unique.forEach((record, i) => {
     const base = i * 7;
     tuples.push(`($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7})`);
     values.push(
@@ -354,9 +368,18 @@ export async function recordOutcomes(
 ): Promise<void> {
   if (input.outcomes.length === 0) return;
 
+  // Same reasoning as registerDiscovered: one row per source id, so a repeated
+  // record cannot produce two conflicting updates in one statement.
+  const seenOutcome = new Set<string>();
+  const uniqueOutcomes = input.outcomes.filter((outcome) => {
+    if (seenOutcome.has(outcome.sourceId)) return false;
+    seenOutcome.add(outcome.sourceId);
+    return true;
+  });
+
   const values: unknown[] = [];
   const tuples: string[] = [];
-  input.outcomes.forEach((outcome, i) => {
+  uniqueOutcomes.forEach((outcome, i) => {
     const base = i * 8;
     tuples.push(
       `($${base + 1},$${base + 2},$${base + 3},$${base + 4}::text,$${base + 5}::text,` +

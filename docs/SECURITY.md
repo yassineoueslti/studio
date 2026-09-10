@@ -75,6 +75,49 @@ migration database holds, so:
   record stays accounted for after its payload is gone;
 * reading a raw payload requires `migration.admin` and is itself audited.
 
+## Pre-deployment audit
+
+A hostile-input audit was run against every boundary before deployment. It
+found **fifteen** genuine defects, all fixed and each now covered by a
+regression test. They are recorded here because the pattern matters more than
+the list: every one passed the functional suite first.
+
+### Authorization
+
+| Finding | Severity | Fix |
+|---|---|---|
+| Internal endpoints accepted a `migration_id` without checking it belonged to the caller's tenant — a valid token could poison another tenant's checkpoints, inject errors into their dashboard, or tag rows with their migration | **High** | Every internal endpoint now verifies ownership, reporting *not found* rather than *forbidden* so it cannot be used to probe for ids |
+| `GET /webhooks/:vendor/inbox` was anonymous and returned vendor event ids, types and error text across all customers | **High** | Authenticated. The POST ingress stays open because vendors must reach it |
+| `GET /metrics` was anonymous | Medium | Authenticated. `/health` stays open for load balancers and leaks nothing beyond liveness |
+
+### Data integrity
+
+| Finding | Severity | Fix |
+|---|---|---|
+| Idempotency used check-then-insert. Three concurrent identical batches produced **19 duplicate contacts** | **High** | Unique index on `(tenant_id, external_source_platform, external_source_id)` plus `INSERT … ON CONFLICT`. The guarantee now lives in a constraint, which a race cannot lose |
+| A source repeating one record inside a page aborted the whole migration with a raw Postgres error (`cannot affect row a second time`) — and real APIs do this when rows shift under a paginating reader | **High** | Repeats collapse before the multi-row insert |
+| A short batch response was only detected in the HTTP driver, so the in-process path accepted it silently | **High** | Completeness is asserted in the orchestrator, covering every driver |
+| A destination could return results for records it was never sent, writing fabricated entries into the object map | Medium | Results are filtered to what was actually sent; phantoms are logged and discarded |
+| An adapter reporting `hasMore` forever looped indefinitely | Medium | Extraction stops on an empty page and warns if the adapter still claimed more |
+
+### Configuration and filesystem
+
+| Finding | Severity | Fix |
+|---|---|---|
+| A wrong-length `MIGRATION_SECRET_KEY` let the service boot healthy and pass health checks, then fail the first customer's source connection with a generic 500 | **High** | Key length is validated at startup, so a misconfigured deploy refuses to start |
+| Tenant and migration ids reached a filesystem path unsanitized | Medium | Every path segment is reduced to safe characters; confinement to the storage root is tested with a hostile tenant id |
+| `tsx` strips types without checking them, so a type error could pass all tests | Medium | `pnpm test` now typechecks first |
+| Production could start with `DESTINATION_DRIVER=http` over plain HTTP | Low | Production requires `https://` |
+
+### Verified as already safe
+
+Confirmed by test rather than assumed: SQL identifiers are never interpolated
+from user input; hostile SQL in source ids and payloads round-trips as literal
+text; batch size limits hold; deeply nested payloads do not crash the process;
+a reused idempotency key cannot overwrite a different record; credentials never
+appear in any API response and are ciphertext at rest; errors carry no stack
+traces or connection strings.
+
 ## Open items before production
 
 - [ ] **Signed URLs for file transfer** (item 6). The sandbox writes to local

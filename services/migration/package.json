@@ -8,11 +8,13 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "vitest run",
+    "test": "tsc -p tsconfig.json --noEmit && vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:migrate": "tsx src/db/migrate.ts",
-    "demo": "tsx scripts/sprint1-acceptance.ts"
+    "demo": "tsx scripts/sprint1-acceptance.ts",
+    "test:only": "vitest run",
+    "verify": "pnpm typecheck && pnpm test:only && pnpm demo"
   },
   "dependencies": {
     "fastify": "^5.2.1",

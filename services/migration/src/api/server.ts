@@ -86,7 +86,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { status: 'ok', destination_driver: config().DESTINATION_DRIVER };
   });
 
-  app.get('/metrics', async (_request, reply) => {
+  // Authenticated: the series names and labels expose migration volumes, error
+  // rates and which sources are in use. Harmless individually, but it is
+  // operational intelligence about customers and there is no reason to give it
+  // away anonymously. Health stays open because load balancers need it.
+  app.get('/metrics', async (request, reply) => {
+    if (!requireAuth(request, reply)) return;
     reply.header('content-type', 'text/plain; version=0.0.4');
     return metrics.render();
   });

@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { PoolClient } from 'pg';
 import { config } from '../config.js';
-import { getPool, withTransaction } from '../db/pool.js';
+import { getPool, withTransaction, type Sql } from '../db/pool.js';
 import type { EntityType } from '../domain/entities.js';
 import { addressKey, normalizeNameKey } from '../transformers/normalize.js';
 import type {
@@ -120,37 +120,26 @@ export class SandboxDestination implements DestinationClient {
         };
       }
       // Same key, changed content: this is a delta update, not a duplicate.
-      const updated = await this.applyRow(client, writer, request, record, prior.object_id, 'UPDATE');
+      const { objectId } = await this.upsertRow(client, writer, request, record, prior.object_id);
       await client.query(
         'UPDATE bl_idempotency_keys SET result_status = $2, content_hash = $3 WHERE idempotency_key = $1',
         [record.idempotencyKey, 'UPDATED', record.contentHash],
       );
-      return { source_id: record.sourceId, status: 'UPDATED', builderlync_id: updated };
+      return { source_id: record.sourceId, status: 'UPDATED', builderlync_id: objectId };
     }
 
-    // --- External-identity replay ----------------------------------------
+    // --- Atomic create-or-update on source identity ----------------------
     // A different migration may already have imported this exact source object
-    // (Scope §3.2). The idempotency key embeds the migration id, so it would
-    // miss that; external_source_* would not.
-    const byExternal = await client.query<{ id: string }>(
-      `SELECT id FROM ${writer.table}
-        WHERE tenant_id = $1 AND external_source_platform = $2 AND external_source_id = $3
-        LIMIT 1`,
-      [request.tenantId, sourcePlatformOf(record.payload), record.sourceId],
-    );
-
-    let objectId: string;
-    let status: BatchRecordResult['status'];
-
-    if (byExternal.rowCount && byExternal.rows[0]) {
-      objectId = byExternal.rows[0].id;
-      await this.applyRow(client, writer, request, record, objectId, 'UPDATE');
-      status = 'UPDATED';
-    } else {
-      objectId = `bl_${request.entity}_${randomUUID()}`;
-      await this.applyRow(client, writer, request, record, objectId, 'INSERT');
-      status = 'CREATED';
-    }
+    // (Scope §3.2), and the idempotency key embeds the migration id, so it
+    // would miss that. External source identity catches it.
+    //
+    // Done as a single upsert rather than SELECT-then-INSERT: two concurrent
+    // workers writing the same source record both miss a prior SELECT and both
+    // insert, which is precisely the duplicate idempotency exists to prevent.
+    // The unique index on (tenant_id, external_source_platform,
+    // external_source_id) makes the conflict impossible to lose.
+    const { objectId, created } = await this.upsertRow(client, writer, request, record);
+    const status: BatchRecordResult['status'] = created ? 'CREATED' : 'UPDATED';
 
     await client.query(
       `INSERT INTO bl_idempotency_keys (idempotency_key, tenant_id, object_type, object_id, result_status, content_hash)
@@ -162,14 +151,22 @@ export class SandboxDestination implements DestinationClient {
     return { source_id: record.sourceId, status, builderlync_id: objectId };
   }
 
-  private async applyRow(
+  /**
+   * Insert the record, or update it if its source identity is already present.
+   *
+   * Returns whether the row was newly created, derived from Postgres' `xmax`:
+   * on a freshly inserted row xmax is 0, on a row updated by ON CONFLICT it is
+   * the updating transaction id. That is what lets one statement report
+   * CREATED vs UPDATED without a second query -- and without the race a second
+   * query would reintroduce.
+   */
+  private async upsertRow(
     client: PoolClient,
     writer: EntityWriter,
     request: BatchRequest,
     record: BatchRequest['records'][number],
-    objectId: string,
-    mode: 'INSERT' | 'UPDATE',
-  ): Promise<string> {
+    forceObjectId?: string,
+  ): Promise<{ objectId: string; created: boolean }> {
     const ctx: WriteContext = {
       tenantId: request.tenantId,
       migrationId: request.migrationId,
@@ -188,28 +185,40 @@ export class SandboxDestination implements DestinationClient {
     row['tenant_id'] = request.tenantId;
     row['external_source_platform'] = ctx.sourcePlatform;
     row['external_source_id'] = record.sourceId;
+    row['id'] = forceObjectId ?? `bl_${request.entity}_${randomUUID()}`;
+    row['created_by_migration_id'] = request.migrationId;
 
-    if (mode === 'INSERT') {
-      row['id'] = objectId;
-      row['created_by_migration_id'] = request.migrationId;
-      const columns = Object.keys(row);
-      const placeholders = columns.map((_, i) => `$${i + 1}`);
-      await client.query(
-        `INSERT INTO ${writer.table} (${columns.map(quote).join(', ')}) VALUES (${placeholders.join(', ')})`,
-        Object.values(row),
-      );
-    } else {
-      row['updated_by_migration_id'] = request.migrationId;
-      row['updated_at'] = new Date();
-      delete row['created_by_migration_id'];
-      const columns = Object.keys(row);
-      const assignments = columns.map((c, i) => `${quote(c)} = $${i + 1}`);
-      await client.query(
-        `UPDATE ${writer.table} SET ${assignments.join(', ')} WHERE id = $${columns.length + 1}`,
-        [...Object.values(row), objectId],
-      );
+    const available = await tableColumns(client, writer.table);
+    const columns = Object.keys(row);
+    const placeholders = columns.map((_, i) => `$${i + 1}`);
+
+    // On conflict, keep the original id and created_by_migration_id -- the row
+    // belongs to whichever migration first created it -- and record this
+    // migration as the updater instead. Only columns the table actually has
+    // are named.
+    const updatable = columns.filter((c) => c !== 'id' && c !== 'created_by_migration_id');
+    const assignments = updatable.map((c) => `${quote(c)} = EXCLUDED.${quote(c)}`);
+
+    const params: unknown[] = Object.values(row);
+    if (available.has('updated_by_migration_id')) {
+      params.push(request.migrationId);
+      assignments.push(`"updated_by_migration_id" = $${params.length}`);
     }
-    return objectId;
+    if (available.has('updated_at')) assignments.push('"updated_at" = now()');
+
+    const { rows } = await client.query<{ id: string; inserted: boolean }>(
+      `INSERT INTO ${writer.table} (${columns.map(quote).join(', ')})
+       VALUES (${placeholders.join(', ')})
+       ON CONFLICT (tenant_id, external_source_platform, external_source_id)
+         WHERE external_source_id IS NOT NULL
+       DO UPDATE SET ${assignments.join(', ')}
+       RETURNING id, (xmax = 0) AS inserted`,
+      params,
+    );
+
+    const result = rows[0];
+    if (!result) throw new Error(`Upsert into ${writer.table} returned no row for ${record.sourceId}`);
+    return { objectId: result.id, created: result.inserted };
   }
 
   async findContactCandidates(criteria: ContactLookupCriteria): Promise<ContactCandidate[]> {
@@ -290,10 +299,14 @@ export class SandboxDestination implements DestinationClient {
     // Scope §23: hash what was actually stored, not what the source claimed.
     const destinationHash = createHash('sha256').update(request.content).digest('hex');
     const fileId = `bl_file_${randomUUID()}`;
+    // Every segment is sanitized, including the tenant and migration ids.
+    // They come from a verified token and a uuid-validated body today, but a
+    // filesystem path is not a place to depend on that: one identity string
+    // containing "../" would write outside the storage root.
     const storageKey = join(
       config().FILE_STORAGE_ROOT,
-      request.tenantId,
-      request.migrationId,
+      sanitizePathSegment(request.tenantId),
+      sanitizePathSegment(request.migrationId),
       `${fileId}-${sanitizeFileName(request.fileName)}`,
     );
 
@@ -333,7 +346,7 @@ export class SandboxDestination implements DestinationClient {
   async countsForMigration(tenantId: string, migrationId: string): Promise<DestinationCounts[]> {
     const out: DestinationCounts[] = [];
     for (const [entity, writer] of Object.entries(WRITERS) as Array<[EntityType, EntityWriter]>) {
-      const hasUpdatedColumn = TABLES_WITH_UPDATED_BY.has(writer.table);
+      const hasUpdatedColumn = (await tableColumns(getPool(), writer.table)).has('updated_by_migration_id');
       const { rows } = await getPool().query<{ created: number; updated: number }>(
         `SELECT
            count(*) FILTER (WHERE created_by_migration_id = $2)::int AS created,
@@ -441,6 +454,16 @@ function sanitizeFileName(name: string): string {
 }
 
 /**
+ * Reduce an identifier to something that cannot escape its parent directory.
+ * Separators and dots are removed outright rather than replaced, so no
+ * combination of "..", "./" or encoded separators survives.
+ */
+function sanitizePathSegment(value: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 128);
+  return cleaned.length > 0 ? cleaned : 'unknown';
+}
+
+/**
  * Postgres error codes that mean "this write will fail identically forever":
  * unique violation, check violation, not-null violation, invalid text
  * representation. Retrying these burns quota to reproduce the same failure.
@@ -450,11 +473,38 @@ function isDeterministicWriteFailure(err: unknown): boolean {
   return code === '23505' || code === '23514' || code === '23502' || code === '22P02' || code === '23503';
 }
 
-const TABLES_WITH_UPDATED_BY = new Set([
-  'bl_accounts', 'bl_locations', 'bl_users', 'bl_companies', 'bl_contacts',
-  'bl_pipelines', 'bl_pipeline_stages', 'bl_opportunities', 'bl_jobs', 'bl_notes',
-  'bl_tags', 'bl_custom_fields',
-]);
+/**
+ * Which columns each destination table actually has, read from the database
+ * rather than hardcoded.
+ *
+ * A hand-maintained list drifts from the schema silently and then fails at
+ * runtime: bl_notes, bl_activities, bl_tasks, bl_appointments and bl_files have
+ * no updated_at, and bl_tags and bl_custom_fields have no
+ * updated_by_migration_id, but a hardcoded list claimed otherwise -- so an
+ * upsert naming those columns failed to parse and every note insert died.
+ * Writing a corrected list would only reset the clock on the same bug; asking
+ * the database removes the class of error.
+ */
+const columnCache = new Map<string, Set<string>>();
+
+async function tableColumns(sql: Sql, table: string): Promise<Set<string>> {
+  const cached = columnCache.get(table);
+  if (cached) return cached;
+
+  const { rows } = await sql.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = $1`,
+    [table],
+  );
+  const columns = new Set<string>(rows.map((r) => r.column_name));
+  columnCache.set(table, columns);
+  return columns;
+}
+
+/** Test support: forget cached schema after a migration adds columns. */
+export function resetColumnCache(): void {
+  columnCache.clear();
+}
 
 const WRITERS: Partial<Record<EntityType, EntityWriter>> = {
   account: {

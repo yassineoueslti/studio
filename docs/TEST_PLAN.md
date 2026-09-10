@@ -34,8 +34,10 @@ Additional coverage beyond the eleven:
 | Pause / cancel / concurrency: operator intent survives the run's error path; two runs cannot race | 5 | `lifecycle-control.test.ts` |
 | Two-pass delivery, partial entity selection, go-live blockers, 30-day SLA | 9 | `two-pass-onboarding.test.ts` |
 | Historical fidelity: attribution stamping, idempotency, no fabricated dates; file integrity degradation when the destination returns no checksum | 14 | `historical-fidelity.test.ts` |
+| Adversarial: cross-tenant and cross-migration writes, anonymous surface, SQL/path/control-character injection, resource limits, idempotency abuse, secret hygiene | 22 | `adversarial.test.ts` |
+| Hostile pipeline: adapters that repeat records, throw, or never terminate; destinations that omit or invent results; corrupted checkpoints; implausible dates and non-object records | 10 | `hostile-pipeline.test.ts` |
 
-**103 tests total.**
+**135 tests total.**
 
 ## What these tests deliberately do *not* mock
 

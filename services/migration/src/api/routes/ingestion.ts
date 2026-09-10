@@ -4,6 +4,30 @@ import { ENTITY_TYPES, type EntityType } from '../../domain/entities.js';
 import { ERROR_CODES } from '../../domain/errors.js';
 import { getDestination } from '../../destination/index.js';
 import { requireAuth } from '../auth.js';
+import { getPool } from '../../db/pool.js';
+import * as migrationsRepo from '../../db/repositories/migrations.js';
+import { MigrationError } from '../../domain/errors.js';
+import type { Principal } from '../../domain/permissions.js';
+
+/**
+ * Confirm the migration exists AND belongs to the caller's tenant.
+ *
+ * Every internal endpoint takes a migration_id from the request. Without this
+ * check a caller holding a perfectly valid token for their own tenant could
+ * aim writes at somebody else's migration: poisoning its checkpoints so a
+ * resumed run skips real records, injecting errors into its dashboard, or
+ * tagging destination rows with a migration that does not belong to them --
+ * which breaks the audit chain Scope §83 requires.
+ *
+ * Reported as not-found rather than forbidden, so the endpoint cannot be used
+ * to discover which migration ids exist in other tenants (Scope §47).
+ */
+async function requireOwnedMigration(principal: Principal, migrationId: string): Promise<void> {
+  const migration = await migrationsRepo.getMigration(getPool(), principal.tenantId, migrationId);
+  if (!migration) {
+    throw new MigrationError('SOURCE_NOT_FOUND', `Migration ${migrationId} was not found.`, { migrationId });
+  }
+}
 
 /**
  * Internal ingestion API (Guide §1.2, Scope §43-45).
@@ -58,6 +82,7 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
       if (!principal) return;
 
       const body = batchBody.parse(request.body);
+      await requireOwnedMigration(principal, body.migration_id);
       const destination = getDestination();
 
       const response = await destination.writeBatch({
@@ -111,6 +136,8 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
       /** Base64 body. Large assets should use the streaming path in production. */
       content_base64: z.string().min(1),
     }).parse(request.body);
+
+    await requireOwnedMigration(principal, body.migration_id);
 
     const content = Buffer.from(body.content_base64, 'base64');
     const { createHash } = await import('node:crypto');
@@ -184,6 +211,8 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
       extraction_complete: z.boolean().default(false),
     }).parse(request.body);
 
+    await requireOwnedMigration(principal, migrationId);
+
     const { withTransaction } = await import('../../db/pool.js');
     const recordsRepo = await import('../../db/repositories/records.js');
 
@@ -213,6 +242,8 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
       entity: z.enum(ENTITY_TYPES),
     }).parse(request.params);
 
+    await requireOwnedMigration(principal, params.migrationId);
+
     const recordsRepo = await import('../../db/repositories/records.js');
     const checkpoint = await recordsRepo.getCheckpoint(principal.tenantId, params.migrationId, params.entity);
 
@@ -240,9 +271,10 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
       context: z.record(z.string(), z.unknown()).optional(),
     }).parse(request.body);
 
+    await requireOwnedMigration(principal, migrationId);
+
     const { withTransaction } = await import('../../db/pool.js');
     const errorsRepo = await import('../../db/repositories/errors.js');
-    const { MigrationError } = await import('../../domain/errors.js');
 
     await withTransaction((client) =>
       errorsRepo.recordError(client, {
@@ -265,6 +297,7 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
     const principal = requireAuth(request, reply);
     if (!principal) return;
     const { migrationId } = z.object({ migrationId: z.string().uuid() }).parse(request.params);
+    await requireOwnedMigration(principal, migrationId);
     return { counts: await getDestination().countsForMigration(principal.tenantId, migrationId) };
   });
 
@@ -272,6 +305,7 @@ export function registerIngestionRoutes(app: FastifyInstance): void {
     const principal = requireAuth(request, reply);
     if (!principal) return;
     const { migrationId } = z.object({ migrationId: z.string().uuid() }).parse(request.params);
+    await requireOwnedMigration(principal, migrationId);
     return await getDestination().relationshipIntegrity(principal.tenantId, migrationId);
   });
 }

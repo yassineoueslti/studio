@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getPool } from '../../db/pool.js';
+import { requireAuth } from '../auth.js';
 
 /**
  * Webhook event inbox (Scope §52, Guide §18.3).
@@ -46,8 +47,17 @@ export function registerWebhookRoutes(app: FastifyInstance): void {
     return reply.code(202).send({ received: true, duplicate: false, event_id: rows[0]?.id });
   });
 
-  /** Inbox inspection, for delta-sync troubleshooting. */
-  app.get('/webhooks/:vendor/inbox', async (request) => {
+  /**
+   * Inbox inspection, for delta-sync troubleshooting.
+   *
+   * Authenticated, unlike the ingress below. The ingress must stay open for
+   * vendors to POST to, but the inbox holds vendor event ids, event types and
+   * error text across every customer -- world-readable, that is a standing
+   * information leak.
+   */
+  app.get('/webhooks/:vendor/inbox', async (request, reply) => {
+    const principal = requireAuth(request, reply);
+    if (!principal) return;
     const { vendor } = z.object({ vendor: z.string() }).parse(request.params);
     const { rows } = await getPool().query(
       `SELECT id, vendor_event_id, event_type, status, received_at, processed_at, attempt_count, error_message
