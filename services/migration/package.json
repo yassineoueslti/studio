@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/bundle-assets.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "tsc -p tsconfig.json --noEmit && vitest run",
@@ -14,7 +14,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "demo": "tsx scripts/sprint1-acceptance.ts",
     "test:only": "vitest run",
-    "verify": "pnpm typecheck && pnpm test:only && pnpm demo"
+    "verify": "pnpm typecheck && pnpm build && pnpm test:only && pnpm demo"
   },
   "dependencies": {
     "fastify": "^5.2.1",

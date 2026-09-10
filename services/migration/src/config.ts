@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { loadDotEnv } from './env.js';
 
 /**
  * Process configuration. Every secret arrives through the environment and is
@@ -35,6 +36,13 @@ export type Config = z.infer<typeof schema>;
 let cached: Config | null = null;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  // Every entrypoint -- the server, the migration CLI, the acceptance script
+  // and anything added later -- reaches configuration through here, so this is
+  // the one place that cannot be forgotten. Real environment variables still
+  // win over the file (see env.ts), so a container's injected secrets are
+  // never overridden.
+  if (env === process.env) loadDotEnv();
+
   const parsed = schema.safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');

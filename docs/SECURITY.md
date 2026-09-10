@@ -109,6 +109,22 @@ the list: every one passed the functional suite first.
 | `tsx` strips types without checking them, so a type error could pass all tests | Medium | `pnpm test` now typechecks first |
 | Production could start with `DESTINATION_DRIVER=http` over plain HTTP | Low | Production requires `https://` |
 
+### Deployment surface
+
+Found by stopping the "run it from source" habit and doing what an operator
+does: follow the README on a clean machine, build the artifact, start it. Every
+one of these was invisible behind a green test suite, because the suite never
+built the service and never read a config file.
+
+| Finding | Severity | Fix |
+|---|---|---|
+| Nothing in the codebase read `.env`. The README instructs the operator to create one and put `MIGRATION_SECRET_KEY` in it — every value they configured was silently ignored in favour of schema defaults, giving a service pointed at the wrong database with credential encryption unconfigured | **High** | `src/env.ts` loads `.env` through the single choke point every entrypoint already uses. Real environment variables still win, so container secrets are never overridden by a `.env` baked into an image |
+| `.env.example` shipped `DESTINATION_DRIVER=in-memory`; the schema accepts only `sandbox \| http`. Copying the example verbatim, exactly as the README says, produced a service that refused to start | Medium | Corrected, and a test now parses `.env.example` against the real schema so the two cannot drift again |
+| The build emitted `dist/src/index.js` while `package.json` pointed `main` and `start` at `dist/index.js`. `pnpm start` could never have worked | **High** | A dedicated `tsconfig.build.json` with a single root. `pnpm build` asserts the entrypoint exists before it reports success |
+| The production build compiled the test suite, the mock source adapter and the acceptance script into `dist/` | Medium | The build config covers `src/` only; asserted by test |
+| Schema migrations are `.sql` files read from disk relative to the compiled module, and `tsc` does not copy them. A built service would start, pass its health check, and die on its first query with `ENOENT` | **High** | `scripts/bundle-assets.mjs` copies them and fails the build if any is missing |
+| The test suite inherited the *development* database defaults, so on a machine where that database was reachable, running the tests would have `TRUNCATE`d it | Medium | Vitest pins the test database and keys, so the suite cannot reach any other database |
+
 ### Verified as already safe
 
 Confirmed by test rather than assumed: SQL identifiers are never interpolated

@@ -1,0 +1,25 @@
+{
+  // Production build.
+  //
+  // The base tsconfig deliberately covers src/, test/ and scripts/ so that
+  // `pnpm typecheck` checks everything a contributor can break. That same
+  // config is wrong for shipping: with three roots, tsc widens rootDir to the
+  // package root, so `src/index.ts` lands at `dist/src/index.js` -- while
+  // package.json points `main` and `start` at `dist/index.js`, a path that
+  // never exists. The service could not be started from a build at all, and
+  // nobody noticed because every local run goes through `tsx` from source.
+  //
+  // It also compiled the test suite, the mock source adapter and the
+  // acceptance script into the production artifact.
+  //
+  // So the build gets its own config: one root, source only.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "test", "scripts"]
+}

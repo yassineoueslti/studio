@@ -36,8 +36,9 @@ Additional coverage beyond the eleven:
 | Historical fidelity: attribution stamping, idempotency, no fabricated dates; file integrity degradation when the destination returns no checksum | 14 | `historical-fidelity.test.ts` |
 | Adversarial: cross-tenant and cross-migration writes, anonymous surface, SQL/path/control-character injection, resource limits, idempotency abuse, secret hygiene | 22 | `adversarial.test.ts` |
 | Hostile pipeline: adapters that repeat records, throw, or never terminate; destinations that omit or invent results; corrupted checkpoints; implausible dates and non-object records | 10 | `hostile-pipeline.test.ts` |
+| Deployment surface: `.env.example` parses against the real schema and ships no secrets; `.env` is actually read and loses to real environment variables; production refuses a sandbox destination, plain HTTP, and a missing or wrong-length key; the build emits a runnable entrypoint with its schema migrations and without test code | 14 | `deployment.test.ts` |
 
-**135 tests total.**
+**149 tests total.**
 
 ## What these tests deliberately do *not* mock
 
