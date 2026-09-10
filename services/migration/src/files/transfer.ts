@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { getPool, withTransaction } from '../db/pool.js';
 import * as errorsRepo from '../db/repositories/errors.js';
 import * as recordsRepo from '../db/repositories/records.js';
-import type { DestinationClient } from '../destination/types.js';
+import type { DestinationClient, IntegrityLevel } from '../destination/types.js';
 import type { EntityType } from '../domain/entities.js';
 import { MigrationError, toMigrationError } from '../domain/errors.js';
 import { metrics } from '../observability/metrics.js';
@@ -290,14 +290,41 @@ export class FileTransferEngine {
         retryOptionsFrom(this.adapter.rateLimit, { signal: this.signal }),
       );
 
-      // Scope §23: true integrity validation compares what we sent with what
-      // the destination says it stored, rather than assuming a 200 means intact.
-      if (uploaded.destination_hash !== sourceHash) {
-        throw new MigrationError(
-          'FILE_UPLOAD_ERROR',
-          `Integrity check failed: source hash ${sourceHash.slice(0, 12)} != destination hash ${uploaded.destination_hash.slice(0, 12)}`,
-          { entity: row.entity_type, sourceId: row.source_file_id },
-        );
+      // Scope §23: verify what the destination actually stored rather than
+      // assuming a 200 means intact.
+      //
+      // Whether BuilderLync returns a checksum is unconfirmed. Requiring one
+      // would fail every upload against a destination that does not provide it;
+      // assuming success when one is absent would let the report claim verified
+      // integrity that was never checked. So the check degrades explicitly and
+      // the level reached is recorded per file.
+      let integrity: IntegrityLevel;
+
+      if (uploaded.destination_hash) {
+        if (uploaded.destination_hash !== sourceHash) {
+          throw new MigrationError(
+            'FILE_UPLOAD_ERROR',
+            `Integrity check failed: source hash ${sourceHash.slice(0, 12)} != destination hash ` +
+              `${uploaded.destination_hash.slice(0, 12)}`,
+            { entity: row.entity_type, sourceId: row.source_file_id },
+          );
+        }
+        integrity = 'hash_verified';
+      } else if (typeof uploaded.size_bytes === 'number') {
+        if (uploaded.size_bytes !== downloaded.content.byteLength) {
+          throw new MigrationError(
+            'FILE_UPLOAD_ERROR',
+            `Integrity check failed: uploaded ${downloaded.content.byteLength} bytes but the ` +
+              `destination stored ${uploaded.size_bytes}`,
+            { entity: row.entity_type, sourceId: row.source_file_id },
+          );
+        }
+        // A size match catches truncation, which is the common corruption mode
+        // for an interrupted upload. It cannot catch silent byte corruption --
+        // hence a distinct level rather than calling this "verified".
+        integrity = 'size_verified';
+      } else {
+        integrity = 'unverified';
       }
 
       await getPool().query(
@@ -305,16 +332,26 @@ export class FileTransferEngine {
             SET state = 'CREATED', download_status = 'COMPLETE', upload_status = 'COMPLETE',
                 source_hash = $2, destination_hash = $3, destination_file_id = $4,
                 destination_url = $5, destination_size_bytes = $6,
-                parent_builderlync_id = $7, failure_reason = NULL, failure_code = NULL,
+                parent_builderlync_id = $7, integrity_level = $8,
+                failure_reason = NULL, failure_code = NULL,
                 next_retry_at = NULL, updated_at = now()
           WHERE id = $1`,
         [
-          row.id, sourceHash, uploaded.destination_hash, uploaded.builderlync_file_id,
-          uploaded.destination_url, uploaded.size_bytes, parentBuilderLyncId,
+          row.id, sourceHash, uploaded.destination_hash ?? null, uploaded.builderlync_file_id,
+          uploaded.destination_url, uploaded.size_bytes, parentBuilderLyncId, integrity,
         ],
       );
 
-      metrics.increment('migration_files_processed_total', { entity: row.entity_type, result: 'uploaded' });
+      if (integrity !== 'hash_verified') {
+        log.warn('Asset stored but integrity only partially verified', {
+          integrity_level: integrity,
+          reason: 'The destination did not return a checksum for comparison.',
+        });
+      }
+
+      metrics.increment('migration_files_processed_total', {
+        entity: row.entity_type, result: 'uploaded', integrity,
+      });
       return { uploaded: true, skipped: false, failed: false, unsupported: false, bytes: uploaded.size_bytes };
     } catch (err) {
       const error = toMigrationError(err, { entity: row.entity_type, sourceId: row.source_file_id });
@@ -428,20 +465,34 @@ function kindFor(entity: EntityType): 'document' | 'image' | 'attachment' {
 }
 
 /** File reconciliation counts (Guide §17.3). */
-export async function fileCounts(tenantId: string, migrationId: string): Promise<{
-  discovered: number; uploaded: number; failed: number; unsupported: number; pending: number;
-}> {
-  const { rows } = await getPool().query<{
-    discovered: number; uploaded: number; failed: number; unsupported: number; pending: number;
-  }>(
+export interface FileCounts {
+  discovered: number;
+  uploaded: number;
+  failed: number;
+  unsupported: number;
+  pending: number;
+  /** Of the uploaded files, how thoroughly each was actually checked (Scope §23). */
+  hash_verified: number;
+  size_verified: number;
+  unverified: number;
+}
+
+export async function fileCounts(tenantId: string, migrationId: string): Promise<FileCounts> {
+  const { rows } = await getPool().query<FileCounts>(
     `SELECT count(*)::int                                       AS discovered,
             count(*) FILTER (WHERE state = 'CREATED')::int       AS uploaded,
             count(*) FILTER (WHERE state = 'FAILED')::int        AS failed,
             count(*) FILTER (WHERE state = 'UNSUPPORTED')::int   AS unsupported,
-            count(*) FILTER (WHERE state IN ('DISCOVERED','QUEUED','PROCESSING'))::int AS pending
+            count(*) FILTER (WHERE state IN ('DISCOVERED','QUEUED','PROCESSING'))::int AS pending,
+            count(*) FILTER (WHERE integrity_level = 'hash_verified')::int AS hash_verified,
+            count(*) FILTER (WHERE integrity_level = 'size_verified')::int AS size_verified,
+            count(*) FILTER (WHERE state = 'CREATED' AND coalesce(integrity_level,'unverified') = 'unverified')::int AS unverified
        FROM migration_files
       WHERE tenant_id = $1 AND migration_id = $2`,
     [tenantId, migrationId],
   );
-  return rows[0] ?? { discovered: 0, uploaded: 0, failed: 0, unsupported: 0, pending: 0 };
+  return rows[0] ?? {
+    discovered: 0, uploaded: 0, failed: 0, unsupported: 0, pending: 0,
+    hash_verified: 0, size_verified: 0, unverified: 0,
+  };
 }

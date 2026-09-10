@@ -93,11 +93,30 @@ export interface FileUploadRequest {
 
 export interface FileUploadResult {
   builderlync_file_id: string;
-  destination_hash: string;
+  /**
+   * The destination's own hash of the stored bytes, when it computes one.
+   *
+   * Optional on purpose. Whether BuilderLync returns a checksum is unconfirmed,
+   * and a contract that requires one would make the engine fail every upload
+   * against a destination that simply does not provide it. Scope §23 asks for
+   * "a cryptographic hash when possible" -- the honest reading is that
+   * integrity is verified when the destination makes it verifiable, and
+   * reported as unverified when it does not.
+   */
+  destination_hash?: string | null;
   destination_url: string;
   size_bytes: number;
   idempotent_replay?: boolean;
 }
+
+/** How thoroughly a transferred asset could actually be checked. */
+export type IntegrityLevel =
+  /** Destination hash matched the bytes we sent. */
+  | 'hash_verified'
+  /** No destination hash available; byte count matched what we uploaded. */
+  | 'size_verified'
+  /** Neither could be checked. The upload succeeded but nothing was proven. */
+  | 'unverified';
 
 /** Reconciliation support: what the destination believes it holds (Scope §38). */
 export interface DestinationCounts {

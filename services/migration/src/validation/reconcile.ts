@@ -59,6 +59,10 @@ export interface FileReconciliation {
   failed: number;
   unsupported: number;
   pending: number;
+  /** How thoroughly each uploaded asset could actually be checked (Scope §23). */
+  hash_verified: number;
+  size_verified: number;
+  unverified: number;
   variance: number;
   passed: boolean;
 }

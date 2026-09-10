@@ -10,14 +10,14 @@ Guide §21 fixes the build order. This is where the project stands against it.
 | 4 | Migration service endpoints | **Done** — full `/api/migrations/*` family |
 | 5 | n8n environment and reusable controller workflows | **Done** — MIG-001/100/140/900; staging n8n deployment is an ops task |
 | 6 | Mock/test adapter | **Done** |
-| 7 | HighLevel adapter | **Specified, not implemented** — capabilities declared, verification checklist written. *Reordered: see below* |
+| 7 | HighLevel adapter | **Specified, not implemented — connector #3.** Scopes and rate limits confirmed from public docs |
 | 8 | Deduplication and conflict handling | **Done** |
 | 9 | File transfer engine | **Done** |
 | 10 | Validation/reconciliation | **Done** |
-| 11 | AccuLynx adapter | **Specified, not implemented — promoted to connector #1.** Working scripts exist in-house. See below |
-| 12 | JobNimbus adapter | **Specified, not implemented** |
-| 13 | ProLine hybrid adapter | **Specified, not implemented** — webhook inbox already built |
-| 14 | Roofr/export importer | **Specified, not implemented — connector #2, blocked on sample exports.** See below |
+| 11 | AccuLynx adapter | **Specified, not implemented — connector #1.** Best public documentation of the five. See below |
+| 12 | JobNimbus adapter | **Specified, not implemented — connector #2.** Base URL, auth and pagination confirmed |
+| 13 | ProLine hybrid adapter | **BLOCKED** — no public REST API documentation exists. Webhook inbox already built |
+| 14 | Roofr/export importer | **BLOCKED** on obtaining real sample exports. See below |
 | 15 | Generic CSV/XLSX importer | **Not started** |
 | 16 | Customer wizard | **Backend complete** — every wizard step has an endpoint; UI not built |
 | 17 | Admin console | **Backend complete** — search, object map, raw payloads, revalidate, manifest; UI not built |
@@ -58,68 +58,93 @@ What each planned connector ships with instead:
 
 ## Next sprint
 
-**AccuLynx.**
+**AccuLynx** — on documented merit.
 
-Guide §21 puts HighLevel first, reasoning that it has the most modern API
-surface. That ranks connectors by how pleasant their API is rather than by what
-can actually be finished, and one fact outweighs it: **working AccuLynx
-migration scripts already exist in-house and have run against real client
-accounts.**
+The earlier justification for putting AccuLynx first was that working scripts
+existed in-house to learn from. They do not, and no vendor SME is available, so
+the order was re-derived from what can actually be verified from public
+documentation (researched September 2026).
 
-That is the strongest de-risking signal available. Those scripts encode field
-names, milestone vocabularies, multi-location credential handling and edge cases
-that were each found the hard way against live data. Starting from a proven
-mapping beats starting from vendor documentation, and it is available today.
+AccuLynx still comes first, for a better reason: **it is the best-documented of
+the five by a wide margin, and it maps most directly onto the contractor model
+BuilderLync stores.** Its public reference covers contacts (with emails,
+phones, notes, custom fields, logs and job associations), jobs (with milestones,
+photos, custom fields, trade and work types, lead sources), leads, users,
+documents, payments, invoices, and 30+ webhook topics. It even publishes a
+machine-readable documentation index at `apidocs.acculynx.com/llms.txt`.
 
-### Before writing any AccuLynx code
+### Already established (pinned in `src/adapters/planned.ts`)
 
-Read the existing scripts. Extract, in priority order:
+- API key created by a Location or Company Administrator; **scoped per
+  Location**, one key per integration — which confirms Scope §7.2's requirement
+  that a multi-location company supplies several credentials merging into one
+  canonical stream.
+- Pagination: `pageStartIndex` (zero-based) + `pageSize`. Defaults vary by
+  endpoint, typically 25–100, maximum often 50 — so **page size must be
+  per-endpoint, not global**.
+- Rate limiting is reported through `RateLimit-*` response headers; numeric
+  limits are unpublished, so the limiter must **read the headers** rather than
+  assume a fixed rate.
+- Job-to-contact relationships are exposed directly as job associations, so
+  they do not have to be inferred.
 
-1. The exact AccuLynx field names used per object.
-2. The milestone / status value vocabulary observed in real accounts.
-3. How multi-location credentials are handled.
-4. Pagination parameters and any rate limits hit in practice.
-5. **Every edge case the script special-cases** — each one is a bug someone
-   already paid for.
+### Still to confirm, and it needs a live key
 
-Port that knowledge into `normalize()`, not into the platform. The scripts
-predate the canonical schema, so their output shape will not match; the mappings
-they encode are the valuable part, not their structure.
+- The API base hostname and the exact header the key travels in. The docs
+  describe key *creation* thoroughly but not key *transmission*.
+- Actual numeric rate limits, by reading the headers from a real response.
+- The milestone/status vocabulary in a real account — customer-configurable, and
+  must be mapped rather than copied as foreign ids (Guide §8.5).
+- Whether document download URLs are signed and expiring.
+- Whether any updated-since filter exists; if not, delta sync leans on webhooks
+  plus a reconciliation scan.
 
-### Then
+**So the single thing that unblocks connector #1 is an AccuLynx API key on a
+real account** — ideally a multi-location one, since that exercises the hardest
+requirement.
 
-1. Work the AccuLynx verification checklist in `src/adapters/planned.ts` against
-   current vendor documentation — the scripts show what *worked*, the docs show
-   what is *supported now*, and those diverge over time.
-2. Write connector contract tests pinning both.
-3. Replace `PlannedAdapter` with a real `AccuLynxAdapter`. Extraction order per
-   Guide §8.3: users → contacts → jobs → job contacts/relationships →
-   milestones/status → notes/logs → documents.
-4. Handle multi-location credentials: one company may hold several AccuLynx
-   locations, each with its own key, merging into one canonical stream
-   (Scope §7.2).
-5. Map milestones to BuilderLync stages. **Never copy foreign status ids**
-   (Guide §8.5).
+### Then JobNimbus (#2)
 
-### Then Roofr — but it is blocked
+Simple and unambiguous: base `https://app.jobnimbus.com/api1/`, bearer key,
+`size`/`from` offset pagination, endpoints `/contacts`, `/jobs`, `/tasks`,
+`/estimates`, `/invoices`. Both `/contacts` and `/jobs` return what the key's
+**Access Profile** permits — which confirms Guide §9.1 and makes the permission
+preflight mandatory rather than a nicety.
 
-Roofr is migrated by hand today, so automating it removes real recurring
-effort. There is no existing tooling for it, and it is export-based, so a parser
-cannot be written without **real sample exports**. Column headers, export
-variants and how photo archives reference their parent job cannot be inferred
-from documentation; guessing them produces a parser that fails on the first real
-client file.
+Caveat: the only reference documentation is a Postman collection and **rate
+limits are unpublished**, so start conservatively and measure.
 
-**The unblock:** obtain sanitized sample exports of each type — contacts, jobs,
-and any file/photo archive — and add them to `test/fixtures` as contract tests.
+### Then HighLevel (#3)
 
-HighLevel follows third, and remains the right place to prove the full API-first
-path: OAuth, webhooks and genuine timestamp-based delta sync.
+Ranked third only because it has no native job/project object, so it delivers
+less of the contractor model — but its documentation is the most precise, which
+makes it the right place to prove the full API-first path.
+
+Confirmed: 100 requests / 10 seconds burst, 200,000 / day, counted **per app per
+Location**, reported via `X-RateLimit-*` headers. Contacts paginate with
+`startAfter`/`startAfterId`, 20 default and 100 maximum.
+
+One finding worth carrying into implementation: **there are no separate readonly
+scopes for pipelines, notes or tasks** — they are bundled under
+`contacts.readonly`. Requesting a scope that does not exist fails authorization,
+so the scope list must not invent them.
+
+### Roofr (#4) and ProLine (#5) are blocked, not merely later
+
+- **Roofr** exports contacts, proposals and measurement reports as CSV, and has
+  no public API. A parser cannot be written without **real sample exports** —
+  column headers and how photo archives reference their parent job cannot be
+  inferred, and guessing produces a parser that dies on the first client file.
+- **ProLine** has an API key and webhooks, but **no public REST API reference
+  exists at all** — only end-user integration guides. Either developer
+  documentation comes from ProLine directly, or the Zapier surface has to be
+  assessed for bulk read access. Failing both, ProLine becomes export-assisted
+  like Roofr.
 
 Everything else — batching, checkpointing, retry, dedupe, files, reconciliation,
-reporting, the two-pass delivery model, the go-live checklist, the wizard
-endpoints, the admin console, tenant isolation — already works and is under
-test. A new connector inherits all of it.
+reporting, the two-pass delivery model, historical fidelity, the go-live
+checklist, the wizard endpoints, the admin console, tenant isolation — already
+works and is under test. A new connector inherits all of it.
 
 ## Definition of done for a supported CRM (Scope §82)
 

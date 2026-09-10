@@ -155,13 +155,42 @@ these columns are what make a *targeted* recovery possible instead.
 | `communication_prefs` | object | SENT | `TO CONFIRM` | — | — |
 | `source_created_at` / `source_updated_at` | date \| null | SENT | `TO CONFIRM` | — | — |
 
-**Open questions for BuilderLync**
+**Answered**
 
-- [ ] Are `source_created_at` / `source_updated_at` writable, or does BuilderLync
-      force its own timestamps? If forced, historical data will *appear* to have
-      been created on migration day — which Guide §9.4 explicitly forbids for
-      notes and activities, and is undesirable everywhere else.
+- [x] **Are `source_created_at` / `source_updated_at` writable?**
+      **No. BuilderLync stamps its own created date at write time and will not
+      accept a supplied value.** Confirmed with the BuilderLync team.
+
+      This is the single most consequential destination constraint, and it
+      collides with Guide §9.4. Read that requirement precisely: it forbids
+      rewriting history as new activity *"without storing the original source
+      timestamps/author metadata"*. The obligation is not to set the created
+      date — which is impossible here — but to ensure history does not
+      masquerade as new activity.
+
+      The engine satisfies it in three layers
+      (`src/transformers/historical-fidelity.ts`):
+
+      1. `source_created_at` / `source_updated_at` on every record — exact and
+         machine-readable, used by delta sync and reconciliation, but invisible
+         to someone browsing the UI.
+      2. A dated attribution prefix on every migrated note and activity body:
+         `[2021-03-14 · Mike Reynolds] Called the homeowner...`. This is the
+         layer a human actually sees, and the one that stops five years of
+         history reading as though it happened on migration day.
+      3. The original date mirrored into a `migrated_original_date` custom
+         field, so it can be displayed, sorted and filtered like any native
+         field.
+
+      The limitation is disclosed to the customer once in the migration report,
+      with a record count and an explanation of where the real dates live —
+      never as a per-record warning, which on a large account would write
+      hundreds of thousands of rows and bury the warnings that need a human.
+
+**Still open**
+
 - [ ] What is the custom-field value format — keyed by field id, or by key?
+      This blocks layer 3 above from being verified against the real API.
 - [ ] Are there required fields with no canonical equivalent?
 - [ ] What are the allowed `status` values, and are they per-tenant configurable?
 
@@ -190,12 +219,20 @@ these columns are what make a *targeted* recovery possible instead.
 | `is_active` | SENT | |
 | `is_historical` | SENT | **Scope §19.** Historical employees import as inactive historical users so their past work stays attributed to them instead of landing on current staff |
 
-**Open question**
+**Answered**
 
-- [ ] Does BuilderLync support a non-billable "historical user" concept? If every
-      imported user consumes a seat, `is_historical` must map to something that
-      does not — otherwise migrating a customer with 40 ex-employees silently
-      inflates their bill.
+- [x] **Does importing historical users cost the customer anything?**
+      **No — BuilderLync does not bill per user.** Confirmed with the
+      BuilderLync team.
+
+      This settles Scope §19 in favour of the highest-fidelity option. Every
+      historical employee is imported as an inactive historical user, so their
+      past work stays attributed to them. The lossy alternatives §19 lists —
+      reassigning old work to the account owner, or leaving it unassigned —
+      exist to avoid seat costs that do not apply here, and both destroy the
+      attribution a contractor needs when they ask who handled a job three
+      years ago. They remain available as mapping choices but are no longer
+      the pragmatic default.
 
 ### 2.4 File / Image
 
@@ -214,10 +251,24 @@ these columns are what make a *targeted* recovery possible instead.
       Pre-signed is strongly preferred for large photo libraries.
 - [ ] Maximum file size, and per-tenant storage quota (needed by preflight,
       Scope §16).
-- [ ] Does BuilderLync return a content hash for integrity verification? The
-      engine compares source and destination hashes and **fails the transfer on
-      mismatch** (Scope §23), so a destination that does not return one weakens
-      that check to "the upload returned 200".
+- [ ] **Does BuilderLync return a content hash?** Asked; not answered. The
+      engine no longer depends on the answer either way.
+
+      Requiring a hash would fail every upload against a destination that does
+      not provide one; assuming success without one would let the report claim
+      integrity that was never checked. The transfer therefore degrades
+      explicitly and records which level it reached per file
+      (`migration_files.integrity_level`):
+
+      | Level | Meaning |
+      |---|---|
+      | `hash_verified` | Destination checksum matched the bytes sent |
+      | `size_verified` | No checksum returned; byte count matched. Catches a truncated upload, not silent corruption |
+      | `unverified` | Neither available. The upload succeeded; nothing about its contents was proven |
+
+      A byte-count mismatch still fails the transfer. The migration report
+      states how many files reached each level rather than reporting them all
+      as "verified".
 
 ### 2.5 Remaining entities
 

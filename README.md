@@ -38,7 +38,7 @@ $ pnpm demo
 SPRINT 1 ACCEPTANCE: PASSED
 ```
 
-**89 tests pass**, including all eleven of Guide §20's named
+**103 tests pass**, including all eleven of Guide §20's named
 production-readiness tests.
 
 The five launch connectors — GoHighLevel, AccuLynx, JobNimbus, ProLine, Roofr —
@@ -57,7 +57,7 @@ openssl rand -base64 32          # → MIGRATION_SECRET_KEY in .env
 pnpm install
 pnpm db:migrate
 
-pnpm test     # 89 tests
+pnpm test     # 103 tests
 pnpm demo     # Sprint 1 acceptance run
 pnpm dev      # API on :3001
 ```
@@ -80,6 +80,13 @@ Full walkthrough, including driving a whole migration from cURL:
 ---
 
 ## What is built
+
+**Historical fidelity**
+BuilderLync stamps its own created date, so original dates survive in three
+layers: `source_created_at` fields, a dated attribution prefix on every migrated
+note (`[2021-03-14 · Mike Reynolds] Called the homeowner...`), and a
+`migrated_original_date` custom field — with the limitation disclosed once in
+the report rather than as a warning on every record.
 
 **Delivery workflow**
 Named migration passes (historical → delta → final delta) so client training
@@ -135,7 +142,7 @@ services/migration/     the migration service (Guide §22)
   src/pipeline/         orchestrator, retry, rate limiting
   src/dedupe/           confidence-tier matching
   src/validation/       reconciliation
-  test/                 89 tests
+  test/                 103 tests
   scripts/              Sprint 1 acceptance run
 n8n/workflows/          MIG-001, MIG-100, MIG-140, MIG-900
 docs/                   the documents above
@@ -145,20 +152,22 @@ docs/                   the documents above
 
 ## Next step
 
-The **AccuLynx connector** — chosen because working migration scripts for it
-already exist in-house and have run against real client accounts. Starting from
-a mapping proven against live data beats starting from vendor documentation.
+The **AccuLynx connector** — the best-documented of the five, and the one that
+maps most directly onto the contractor model BuilderLync stores (jobs,
+milestones, job↔contact relationships, documents, webhooks).
 
-Before writing any of it: **read those scripts.** They encode field names,
-milestone vocabularies, multi-location credential handling and edge cases each
-found the hard way. That knowledge belongs in the adapter, not rediscovered.
+Public documentation already pins its pagination (`pageStartIndex`/`pageSize`),
+its `RateLimit-*` headers, and that **API keys are scoped per Location** —
+confirming the multi-credential requirement. What is *not* documented is the
+base hostname and the header the key travels in.
 
-**Roofr** is second and currently **blocked**: it is migrated by hand today, but
-it is export-based and there is no existing tooling, so a parser cannot be
-written without real sample exports to work from.
+**So the one thing that unblocks it is an AccuLynx API key on a real account**,
+ideally multi-location.
 
-**HighLevel** follows — it is where the API-first path (OAuth, webhooks, real
-timestamp delta sync) gets proven.
+Then **JobNimbus** (base URL, auth and pagination all confirmed), then
+**HighLevel** (scopes and rate limits confirmed; note it has no native job
+object). **Roofr** and **ProLine** are blocked — Roofr needs real sample
+exports, ProLine has no public API documentation at all.
 
 A new connector inherits batching, checkpointing, retry, deduplication, file
 transfer, reconciliation, reporting, the two-pass delivery model, the go-live

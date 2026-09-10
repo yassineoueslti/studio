@@ -35,7 +35,13 @@ export interface PlannedAdapterSpec {
   rateLimit: RateLimitProfile;
   paginationStrategy: PaginationStrategy;
   authKind: 'oauth2' | 'api_key' | 'hybrid' | 'file_upload';
-  /** Guide §24: what must be confirmed against live docs before coding. */
+  /**
+   * Facts established from public vendor documentation. These are the
+   * assumptions to pin in connector contract tests (Guide §24), so that a
+   * vendor changing them fails a test rather than a customer's migration.
+   */
+  confirmed?: readonly string[];
+  /** Guide §24: what must still be confirmed, and how. */
   verificationChecklist: readonly string[];
   /** Docs to confirm against. Named, not linked, because URLs rot. */
   documentation: readonly string[];
@@ -79,14 +85,21 @@ export const HIGHLEVEL_SPEC: PlannedAdapterSpec = {
       },
     },
   ),
+  confirmed: [
+    'Rate limits are published: 100 requests per 10 seconds (burst) and 200,000 requests per day.',
+    'Limits are counted per Marketplace app (client) per resource, where a resource is a single Location (sub-account) or Company (agency) -- so a multi-location customer gets proportionally more budget, and the limiter must be keyed per location.',
+    'Usage is reported via X-RateLimit-Limit-Daily, X-RateLimit-Daily-Remaining, X-RateLimit-Interval-Milliseconds, X-RateLimit-Max and X-RateLimit-Remaining.',
+    'Contacts pagination returns 20 by default, maximum 100 per request, using startAfter and startAfterId.',
+    'Read scopes are named exactly: contacts.readonly, opportunities.readonly, locations.readonly, locations/customFields.readonly, locations/customValues.readonly, locations/tags.readonly, users.readonly, calendars.readonly, calendars/events.readonly, calendars/groups.readonly, calendars/resources.readonly, medias.readonly.',
+    'There are NO separate readonly scopes for pipelines, notes or tasks -- access to those is bundled under contacts.readonly. Requesting a non-existent scope fails authorization, so the scope list must not invent them.',
+  ],
   verificationChecklist: [
-    'Confirm the current API version and base URL, and whether the legacy v1 API is still available to new apps.',
-    'Enumerate the minimum OAuth scopes for: locations, users, contacts, custom fields, tags, opportunities, pipelines, notes, tasks.',
-    'Confirm the pagination shape per endpoint (cursor vs page vs startAfter) - it is not uniform across resources.',
-    'Confirm published rate limits per app and per location, plus burst behaviour.',
-    'Confirm token lifetime and refresh semantics, including whether refresh rotates the refresh token.',
-    'Confirm whether media/files are retrievable via API for the plans BuilderLync customers hold.',
-    'Confirm the contact duplicate-handling behaviour on write, so BuilderLync dedupe stays authoritative (Guide §7.6).',
+    'Confirm the current API base URL and version path; the developer glossary references v3 without stating a base URL.',
+    'Confirm token lifetime and refresh semantics, including whether refreshing rotates the refresh token -- this determines whether a long migration can outlive its own credentials.',
+    'Confirm the pagination shape per endpoint; it is documented for contacts but is not uniform across resources.',
+    'Confirm the HTTP status and body returned when throttled, since the documentation states the limits but not the rejection shape.',
+    'Confirm whether media/files are retrievable for the plans BuilderLync customers actually hold (medias.readonly exists, but plan gating is not documented).',
+    'Confirm contact duplicate-handling behaviour on write, so BuilderLync dedupe stays authoritative (Guide §7.6).',
   ],
   documentation: [
     'HighLevel - API Developer Portal',
@@ -135,16 +148,29 @@ export const ACCULYNX_SPEC: PlannedAdapterSpec = {
       },
     },
   ),
-  verificationChecklist: [
-    'Confirm the API key model: per-company or per-location, and how many keys a multi-location customer must supply.',
-    'Confirm published rate limits and whether they are per key or per company.',
-    'Confirm the pagination contract (page/pageSize vs skip/take) and the maximum page size.',
-    'Confirm which job milestone/status fields are exposed and their exact value vocabulary.',
-    'Confirm the document endpoint: listing, metadata, and whether download URLs are signed and expiring.',
-    'Confirm whether job contacts are a distinct resource from contacts, and how the relationship is expressed.',
-    'Confirm whether any updated-since filter exists, which decides if delta sync is real or reconciliation-scan only.',
+  confirmed: [
+    'Public API reference exists at apidocs.acculynx.com, with a machine-readable index at apidocs.acculynx.com/llms.txt.',
+    'Authentication is an API key created by a Location or Company Administrator in AccuLynx Account Settings.',
+    'Keys are scoped PER LOCATION, and the docs state each integration should have its own key -- confirming Scope §7.2: a multi-location company supplies several credentials that must merge into one canonical stream.',
+    'Pagination uses pageStartIndex (or StartIndex), zero-based, plus pageSize. Defaults vary by endpoint, typically 25-100, with a maximum often 50 -- so page size must be per-endpoint, not global.',
+    'Rate limiting applies to write operations and is reported via RateLimit-* response headers. Numeric limits are not published, so the limiter must read the headers rather than assume a fixed rate.',
+    'Documented resources cover contacts (emails, phones, notes, custom fields, logs, job associations), jobs (estimates, invoices, financials, payments, milestones, representatives, photos/videos, measurements, addresses, custom fields, trade types, work types, categories, lead sources, insurance, appointments), leads, users, documents, milestones and statuses, payments, invoices.',
+    'Job contacts are exposed as job associations on the contact resource, so the job-to-contact relationship is retrievable directly rather than needing inference.',
+    'Webhooks exist under /webhooks/v2/ with 30+ documented topics, giving a real delta path.',
   ],
-  documentation: ['AccuLynx - Getting Started', 'AccuLynx - API Integrations for Developers'],
+  verificationChecklist: [
+    'Confirm the API base hostname and the exact header the API key is sent in (name, and whether a Bearer prefix is used) -- the public docs describe key creation but not transmission. Requires a live key.',
+    'Confirm the numeric rate limits by reading RateLimit-* headers from a real response, since they are not published.',
+    'Confirm the exact per-endpoint pageSize maximums rather than assuming the documented typical range.',
+    'Confirm the milestone/status value vocabulary in a real account -- these are customer-configurable and must be mapped, never copied as foreign ids (Guide §8.5).',
+    'Confirm whether document download URLs are signed and expiring, which determines whether the asset pipeline must fetch within a time window.',
+    'Confirm whether any updated-since filter exists on list endpoints. If not, delta sync must rely on webhooks plus a reconciliation scan.',
+  ],
+  documentation: [
+    'AccuLynx API docs: https://apidocs.acculynx.com',
+    'AccuLynx machine-readable doc index: https://apidocs.acculynx.com/llms.txt',
+    'AccuLynx - Getting Started, Authentication, Endpoints, Webhooks End User Reference',
+  ],
   designNotes: [
     'FIRST CONNECTOR TO BUILD. Working AccuLynx migration scripts already exist in-house and have run against real client accounts.',
     'Read those scripts before writing anything. What to extract from them, in priority order: (1) the exact AccuLynx field names used per object, (2) the milestone/status value vocabulary observed in real accounts, (3) how multi-location credentials are handled, (4) pagination parameters and any rate limits hit in practice, (5) every edge case the script special-cases -- each one is a bug found the hard way.',
@@ -189,16 +215,25 @@ export const JOBNIMBUS_SPEC: PlannedAdapterSpec = {
       },
     },
   ),
-  verificationChecklist: [
-    'Confirm the current authorization scheme and header format for platform API keys.',
-    'Confirm how access profiles map to readable resources, and which endpoint reveals the key\'s effective permissions.',
-    'Confirm the pagination contract (size/from) and maximum page size per resource.',
-    'Confirm published rate limits and the throttling response shape.',
-    'Confirm attachment/file listing and download support, and which access profile grants it.',
-    'Confirm whether records expose a reliable updated-at for delta sync.',
-    'Confirm the custom-field representation and whether field ids or names are stable across time.',
+  confirmed: [
+    'REST base URL is https://app.jobnimbus.com/api1/.',
+    'Authentication is an API key sent as a Bearer token in the Authorization header.',
+    'Pagination is offset-based: size (number of elements, default 1000) and from (zero-based start, default 0).',
+    'Documented endpoints include /contacts, /jobs, /tasks, /estimates and /invoices.',
+    'Both /contacts and /jobs return everything the API key\'s Access Profile permits -- confirming Guide §9.1: the key inherits its profile\'s permissions, so a permission preflight is required rather than optional.',
   ],
-  documentation: ['JobNimbus - Platform API Authorization'],
+  verificationChecklist: [
+    'Rate limits are NOT published. Measure them against a live key and start conservatively; the adapter must not assume the default profile is safe.',
+    'Confirm which endpoint (if any) reveals the API key\'s effective permissions, so preflight can report per-object access without probing each resource destructively.',
+    'Confirm attachment/file listing and download support, and which access profile grants it -- file access is the most commonly missing permission.',
+    'Confirm whether records expose a reliable updated-at, which decides whether delta sync is real or a full reconciliation scan.',
+    'Confirm the custom-field representation and whether field ids or names are stable over time.',
+    'The only reference documentation is a Postman collection, so treat every field mapping as unverified until exercised against a real account.',
+  ],
+  documentation: [
+    'JobNimbus Public API (Postman collection) - the only reference documentation available',
+    'JobNimbus - Platform API Authorization',
+  ],
   designNotes: [
     'Preflight must probe every required resource and return a per-object result, e.g. "Contacts OK / Files - permission missing" (Guide §9.2).',
     'Extraction order (Guide §9.3): users/configuration -> contacts -> jobs -> activities/notes -> custom fields/tags -> attachments.',
@@ -238,13 +273,16 @@ export const PROLINE_SPEC: PlannedAdapterSpec = {
       },
     },
   ),
+  confirmed: [
+    'An API key exists and is copyable from the ProLine settings UI, so customer self-service authentication is viable.',
+    'Webhooks and a Zapier integration exist, giving a change-capture path.',
+    'NO public REST API reference documentation could be found. ProLine publishes end-user integration guides, not a developer API reference.',
+  ],
   verificationChecklist: [
-    'Locate the API key under Integrations / ProLine API and confirm its scope.',
-    'Inventory which of contacts, projects, team members, events, quotes, invoices and files are reliably retrievable, against a real account.',
-    'Confirm whether a search/read endpoint supports historical bulk extraction, or whether an export is required.',
-    'Confirm the webhook event catalogue, payload shape, and whether a vendor event id is present for deduplication.',
+    'BLOCKED: without public API documentation, a historical extractor cannot be designed. Either obtain developer documentation from ProLine directly, or determine whether the Zapier integration exposes enough read surface to drive a bulk extraction.',
+    'If neither path yields bulk read access, ProLine becomes export-assisted like Roofr, and needs real sample exports before any work starts.',
+    'Confirm the webhook event catalogue and whether a vendor event id is present -- the inbox already dedupes on a payload hash where one is absent, but an event id is far cheaper.',
     'Confirm retry/delivery semantics for webhooks (documented as not guaranteed) to size the reconciliation scan.',
-    'Confirm file access and whether download URLs are signed and expiring.',
   ],
   documentation: ['ProLine - Zapier / API Key Integration', 'ProLine - Webhooks', 'ProLine - Integrations Collection'],
   designNotes: [
@@ -288,12 +326,15 @@ export const ROOFR_SPEC: PlannedAdapterSpec = {
       },
     },
   ),
+  confirmed: [
+    'Roofr supports exporting contacts, proposals and measurement reports as CSV.',
+    'No public API reference documentation could be found; export is the documented migration path.',
+  ],
   verificationChecklist: [
-    'Confirm which export formats Roofr currently produces and their exact column headers, per export type.',
-    'Confirm whether file and photo archives can be exported, and how assets reference their parent job.',
-    'Confirm whether any API or partner extraction access is available, and which objects it covers.',
+    'BLOCKED: obtain real sample exports of each type. Column headers, export variants and how photo archives reference their parent job cannot be inferred from documentation, and guessing them produces a parser that fails on the first real client file.',
+    'Add the sanitized samples to test/fixtures as contract tests, so a Roofr export-format change fails a test rather than a customer migration.',
     'Determine a deterministic asset-correlation rule: source id, job number, directory structure, or manifest (Guide §11.5).',
-    'Confirm whether exports carry a stable record id; if not, a migration-scoped synthetic id is required (Guide §12.4).',
+    'Confirm whether exports carry a stable record id; if not, a migration-scoped synthetic id is required and its delta limitations documented (Guide §12.4).',
   ],
   documentation: ['Roofr - Data Migration Outline'],
   designNotes: [
@@ -308,28 +349,37 @@ export const ROOFR_SPEC: PlannedAdapterSpec = {
 /**
  * Build order.
  *
- * Guide §21 puts HighLevel first, on the reasoning that it has the most modern
- * API surface. That reasoning is sound in the abstract, but it ranks connectors
- * by how pleasant their API is rather than by what the team can actually
- * finish.
+ * Set from what is actually verifiable from public vendor documentation, since
+ * no reference implementation and no vendor SME are available. Researched
+ * September 2026; see each spec's `documentation` and `confirmed` fields.
  *
- * AccuLynx goes first because working migration scripts for it already exist
- * in-house. That is the strongest de-risking signal available: those scripts
- * encode field mappings, status vocabularies and multi-location credential
- * handling that were discovered against real client accounts. Starting from a
- * proven mapping beats starting from vendor documentation, and it is available
- * today.
+ *   1. AccuLynx   Best-documented for this use case by a wide margin. Public
+ *                 docs cover contacts (with emails, phones, notes, custom
+ *                 fields, logs and job associations), jobs (with milestones,
+ *                 photos/videos, custom fields, trade and work types, lead
+ *                 sources), leads, users, documents, payments, invoices and
+ *                 30+ webhook topics. Pagination and rate-limit headers are
+ *                 documented. It also maps most directly onto the contractor
+ *                 model BuilderLync needs: jobs, milestones, job-to-contact
+ *                 relationships and documents.
+ *   2. JobNimbus  Simple and unambiguous: one base URL, bearer key, offset
+ *                 pagination. Docs are a Postman collection rather than a
+ *                 reference site, and rate limits are unpublished, so more
+ *                 must be discovered against a live key.
+ *   3. HighLevel  Scopes and rate limits are published precisely, which makes
+ *                 it the right place to prove the full API-first path (OAuth,
+ *                 webhooks, timestamp delta sync). Ranked third only because
+ *                 it has no native job/project object, so it delivers less of
+ *                 the contractor data model than the two above.
+ *   4. Roofr      Export-assisted. BLOCKED: needs real sample exports.
+ *   5. ProLine    BLOCKED: no public REST API documentation exists.
  *
- * Roofr is the source currently being migrated by hand, which argues for doing
- * it early -- but there is no existing tooling for it, and it is export-based,
- * so an adapter cannot be written without real sample exports to parse. It sits
- * second, blocked on obtaining those files.
- *
- * HighLevel stays third and remains the right place to prove the full API-first
- * path: OAuth, webhooks and genuine timestamp-based delta sync.
+ * Guide §21 ranks HighLevel first for having the most modern API. That ranks
+ * connectors by API pleasantness rather than by delivered coverage; on the
+ * evidence above, AccuLynx returns more of what BuilderLync actually stores.
  */
 export const PLANNED_SPECS: readonly PlannedAdapterSpec[] = Object.freeze([
-  ACCULYNX_SPEC, ROOFR_SPEC, HIGHLEVEL_SPEC, JOBNIMBUS_SPEC, PROLINE_SPEC,
+  ACCULYNX_SPEC, JOBNIMBUS_SPEC, HIGHLEVEL_SPEC, ROOFR_SPEC, PROLINE_SPEC,
 ]);
 
 /**
@@ -361,7 +411,10 @@ export class PlannedAdapter implements SourceAdapter {
     return new MigrationError(
       'UNSUPPORTED_FIELD',
       `The ${this.platform} connector is specified but not yet implemented (${operation}). ` +
-        `Before implementing it, confirm against current vendor documentation: ` +
+        (this.spec.confirmed?.length
+          ? `Already established from public documentation: ${this.spec.confirmed.join(' ')} `
+          : '') +
+        `Still to confirm before implementing: ` +
         this.spec.verificationChecklist.map((c, i) => `(${i + 1}) ${c}`).join(' ') +
         ` Reference docs: ${this.spec.documentation.join('; ')}.`,
       { raw: { platform: this.platform, operation, checklist: this.spec.verificationChecklist } },

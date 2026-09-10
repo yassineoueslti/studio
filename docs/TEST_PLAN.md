@@ -33,8 +33,9 @@ Additional coverage beyond the eleven:
 | Migration API lifecycle over HTTP, per-record batch results, webhook deduplication | 4 | `production-readiness.test.ts` |
 | Pause / cancel / concurrency: operator intent survives the run's error path; two runs cannot race | 5 | `lifecycle-control.test.ts` |
 | Two-pass delivery, partial entity selection, go-live blockers, 30-day SLA | 9 | `two-pass-onboarding.test.ts` |
+| Historical fidelity: attribution stamping, idempotency, no fabricated dates; file integrity degradation when the destination returns no checksum | 14 | `historical-fidelity.test.ts` |
 
-**89 tests total.**
+**103 tests total.**
 
 ## What these tests deliberately do *not* mock
 

@@ -13,6 +13,9 @@ import type { RecordState } from '../domain/states.js';
 import { createLogger, silentLogger, type Logger } from '../observability/logger.js';
 import { metrics } from '../observability/metrics.js';
 import { supports, type AdapterContext, type SourceAdapter } from '../adapters/types.js';
+import {
+  applyHistoricalFidelity, DEFAULT_HISTORICAL_FIDELITY, type HistoricalFidelityPolicy,
+} from '../transformers/historical-fidelity.js';
 import { RateLimiter } from './ratelimit.js';
 import { retryOptionsFrom, withRetry } from './retry.js';
 
@@ -46,6 +49,11 @@ export interface OrchestratorOptions {
   batchSize?: number;
   /** Delta run: only extract records changed since this instant (Scope §50). */
   updatedSince?: Date | null;
+  /**
+   * How hard to work at making history read as history when the destination
+   * stamps its own created date (Guide §9.4).
+   */
+  historicalFidelity?: HistoricalFidelityPolicy;
 }
 
 export interface RunResult {
@@ -290,7 +298,21 @@ export class Orchestrator {
       const ledgerId = sourceId || fallbackSourceId(raw, entity, batchNumber, index);
       discovered.push({ sourceId: ledgerId, rawPayload: raw });
 
-      for (const warning of (normalized['warnings'] as Array<{ code: string; message: string }>) ?? []) {
+      // BuilderLync stamps its own created date, so history has to be carried
+      // in fields it will accept. Applied centrally rather than per adapter:
+      // an adapter that forgot would produce a migration where five years of
+      // notes read as written today, and nobody would notice until a customer
+      // opened one (Guide §9.4).
+      const fidelity = applyHistoricalFidelity(
+        entity,
+        normalized,
+        this.options.historicalFidelity ?? DEFAULT_HISTORICAL_FIDELITY,
+      );
+
+      for (const warning of [
+        ...((normalized['warnings'] as Array<{ code: string; message: string }>) ?? []),
+        ...fidelity.warnings,
+      ]) {
         warnings.push({ sourceId: ledgerId, code: warning.code, message: warning.message });
       }
 

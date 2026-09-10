@@ -54,6 +54,13 @@ export const migrationUserSchema = canonicalBaseSchema.extend({
    * Scope §19: set when the source user is disabled/deleted, or when the
    * customer chose "Import as Inactive Historical User". Their historical work
    * stays attributed to them instead of landing on a current employee.
+   *
+   * BuilderLync does not bill per user, so importing every historical employee
+   * costs the customer nothing. That removes the only argument for the
+   * lossy alternatives in Scope §19 -- reassigning old work to the account
+   * owner, or leaving it unassigned -- both of which destroy the attribution a
+   * contractor needs when they look up who handled a job three years ago.
+   * Importing them inactive is therefore the default, not a trade-off.
    */
   is_historical: z.boolean().default(false),
 });
