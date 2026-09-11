@@ -30,6 +30,15 @@ Credentials are consistent on purpose: `docker-compose.yml` creates the user
 defaults all point at it. Change one and change all three, or override with
 `DATABASE_URL` and `TEST_DATABASE_URL`, which always win.
 
+n8n is a separate compose file, because it requires an encryption key and an
+API token that Postgres has no need of:
+
+```bash
+export N8N_ENCRYPTION_KEY=...        # from your secret store, not a default
+export BUILDERLYNC_MIGRATION_TOKEN=...
+docker compose -f docker-compose.yml -f docker-compose.n8n.yml up -d
+```
+
 Before deploying anything, run the full gate — typecheck, production build,
 tests, and a complete acceptance migration:
 

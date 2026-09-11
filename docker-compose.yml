@@ -1,7 +1,19 @@
-# Local development stack.
+# Local development stack: the database.
 #
 # The migration service itself runs on the host (pnpm dev) so the edit/test loop
 # stays fast; this file provides its dependencies.
+#
+# n8n lives in docker-compose.n8n.yml rather than here. It requires an
+# encryption key and an API token to be set, and Docker interpolates every
+# variable in a file before it decides which services to start -- so keeping
+# n8n here meant `docker compose up -d postgres` failed with "set
+# N8N_ENCRYPTION_KEY" for someone who only wanted a database. Splitting the
+# files keeps that requirement strict where it belongs without blocking the
+# common path.
+#
+#   docker compose up -d postgres                      # database only
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.n8n.yml up -d     # database + n8n
 
 services:
   postgres:
@@ -21,36 +33,5 @@ services:
       timeout: 5s
       retries: 10
 
-  # Guide §5.1-5.2: a self-hosted n8n with PERSISTENT storage. Migrations are
-  # long-running, so ephemeral execution state is not acceptable.
-  n8n:
-    image: n8nio/n8n:latest
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      N8N_PORT: 5678
-      GENERIC_TIMEZONE: UTC
-      # Execution data is retained long enough to diagnose a failed migration.
-      EXECUTIONS_DATA_SAVE_ON_ERROR: all
-      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
-      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: 'true'
-      EXECUTIONS_DATA_PRUNE: 'true'
-      EXECUTIONS_DATA_MAX_AGE: 336        # hours (14 days)
-      # Guide §5.3 / §19: credentials are encrypted and never live in workflow
-      # JSON. Set this from your secret store, not from a checked-in default.
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY}
-      # Endpoints the MIG-* workflows call.
-      BUILDERLYNC_MIGRATION_API: ${BUILDERLYNC_MIGRATION_API:-http://host.docker.internal:3001}
-      BUILDERLYNC_MIGRATION_TOKEN: ${BUILDERLYNC_MIGRATION_TOKEN:?set BUILDERLYNC_MIGRATION_TOKEN}
-    ports:
-      - '5678:5678'
-    volumes:
-      - n8n-data:/home/node/.n8n
-      - ./n8n/workflows:/workflows:ro
-    extra_hosts:
-      - 'host.docker.internal:host-gateway'
-
 volumes:
   postgres-data:
-  n8n-data:
