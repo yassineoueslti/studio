@@ -3,23 +3,38 @@
 ## Local setup
 
 ```bash
-# 1. PostgreSQL 16
-createdb builderlync_migration
-createdb builderlync_migration_test
+# 1. PostgreSQL 16. This creates BOTH databases and the `builderlync` user
+#    that every default in the repo expects:
+docker compose up -d postgres
+
+#    Already running Postgres yourself? Create the same two databases and
+#    point DATABASE_URL / TEST_DATABASE_URL at them instead.
 
 # 2. Configuration
 cp .env.example services/migration/.env
 # Generate the credential encryption key (Guide §19):
-openssl rand -base64 32     # → MIGRATION_SECRET_KEY
+openssl rand -base64 32     # → MIGRATION_SECRET_KEY in services/migration/.env
 
 # 3. Install and apply the schema
 pnpm install
 pnpm db:migrate
 
 # 4. Run
-pnpm dev            # API on :3001
-pnpm test           # 73 tests
+pnpm test           # 149 tests
 pnpm demo           # Sprint 1 acceptance run
+pnpm dev            # API on :3001
+```
+
+Credentials are consistent on purpose: `docker-compose.yml` creates the user
+`builderlync` with password `builderlync`, and `.env.example` plus the test
+defaults all point at it. Change one and change all three, or override with
+`DATABASE_URL` and `TEST_DATABASE_URL`, which always win.
+
+Before deploying anything, run the full gate — typecheck, production build,
+tests, and a complete acceptance migration:
+
+```bash
+pnpm --filter @builderlync/migration verify
 ```
 
 In development the service registers a bearer token `dev-token` for tenant

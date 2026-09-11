@@ -19,7 +19,7 @@ import { silentLogger } from '../src/observability/logger.js';
  */
 
 export const TEST_DATABASE_URL =
-  process.env.TEST_DATABASE_URL ?? 'postgres://root:root@localhost:5432/builderlync_migration_test';
+  process.env.TEST_DATABASE_URL ?? 'postgres://builderlync:builderlync@localhost:5432/builderlync_migration_test';
 
 let schemaReady = false;
 

@@ -29,7 +29,7 @@ export default defineConfig({
       LOG_LEVEL: 'silent',
       DATABASE_URL:
         process.env.TEST_DATABASE_URL ??
-        'postgres://root:root@localhost:5432/builderlync_migration_test',
+        'postgres://builderlync:builderlync@localhost:5432/builderlync_migration_test',
       // Dev-only fixed key so the credential-encryption paths are exercised
       // deterministically. Decodes to exactly 32 bytes. Never used outside tests.
       MIGRATION_SECRET_KEY:
