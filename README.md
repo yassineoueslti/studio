@@ -56,17 +56,19 @@ extraction code. See [why](docs/ROADMAP.md#why-the-vendor-connectors-are-specifi
 ## Quick start
 
 ```bash
-createdb builderlync_migration && createdb builderlync_migration_test
-cp .env.example services/migration/.env
-openssl rand -base64 32          # → MIGRATION_SECRET_KEY in .env
-
+docker compose up -d postgres   # both databases and the user they expect
 pnpm install
+pnpm setup                      # writes services/migration/.env with a fresh key
 pnpm db:migrate
 
 pnpm test     # 149 tests (typechecks first)
 pnpm demo     # Sprint 1 acceptance run
 pnpm dev      # API on :3001
 ```
+
+Already running your own Postgres? Create `builderlync_migration` and
+`builderlync_migration_test`, then point `DATABASE_URL` and `TEST_DATABASE_URL`
+at them — both override everything else.
 
 `pnpm test` needs nothing but Postgres running — it pins its own database and
 keys, and cannot reach the development database. Everything else reads

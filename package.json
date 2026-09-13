@@ -5,6 +5,7 @@
   "description": "BuilderLync Universal CRM Migration Engine",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "dev": "pnpm --filter @builderlync/migration dev",

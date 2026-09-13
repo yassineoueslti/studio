@@ -10,16 +10,17 @@ docker compose up -d postgres
 #    Already running Postgres yourself? Create the same two databases and
 #    point DATABASE_URL / TEST_DATABASE_URL at them instead.
 
-# 2. Configuration
-cp .env.example services/migration/.env
-# Generate the credential encryption key (Guide §19):
-openssl rand -base64 32     # → MIGRATION_SECRET_KEY in services/migration/.env
-
-# 3. Install and apply the schema
+# 2. Install
 pnpm install
+
+# 3. Configuration — copies .env.example and generates the credential
+#    encryption key (Guide §19) in one step. Never overwrites an existing .env.
+pnpm setup
+
+# 4. Apply the schema
 pnpm db:migrate
 
-# 4. Run
+# 5. Run
 pnpm test           # 149 tests
 pnpm demo           # Sprint 1 acceptance run
 pnpm dev            # API on :3001
