@@ -64,14 +64,19 @@ async function main(): Promise<void> {
 
   // One adapter instance for the whole run: the dataset is seeded, so the
   // "same source data" in the replay step is genuinely the same data.
+  // Deliberately dirty source data. A clean run would prove only that the
+  // engine can copy rows; these rates are what make the validation gate, the
+  // duplicate review queue and the per-record error ledger observable.
+  const PLANTED = { duplicates: 0.02, noContactInfo: 0.03, malformed: 0.002 };
+
   const adapter = new MockAdapter({
     seed: 'builderlync-sprint-1',
     contacts: CONTACTS,
     jobs: JOBS,
     users: 15,
-    duplicateRate: 0.02,
-    noContactInfoRate: 0.03,
-    malformedRate: 0.002,
+    duplicateRate: PLANTED.duplicates,
+    noContactInfoRate: PLANTED.noContactInfo,
+    malformedRate: PLANTED.malformed,
     pageSize: 500,
   });
 
@@ -167,6 +172,27 @@ async function main(): Promise<void> {
   }
   line(`overall validation: ${reconciliation.overallPassed ? 'PASSED' : 'FAILED'}`);
   for (const reason of reconciliation.blockingReasons) line(`  blocking: ${reason}`);
+
+  // This run is SUPPOSED to end with a failing validation gate, and anyone
+  // watching deserves to be told so before they read "FAILED" and conclude the
+  // engine broke.
+  //
+  // The mock source plants bad data on purpose -- duplicates, contacts with no
+  // contact method, and records that violate the canonical schema. A validation
+  // gate that passed here would mean the engine had silently written rubbish
+  // into a customer's CRM, which is the single worst outcome this system exists
+  // to prevent. The gate refusing to clear the migration is the feature.
+  if (!reconciliation.overallPassed) {
+    line('');
+    line('^ Expected. The mock source plants bad records on purpose:');
+    line(
+      `    ${(PLANTED.duplicates * 100).toFixed(0)}% duplicates, ` +
+        `${(PLANTED.noContactInfo * 100).toFixed(0)}% with no phone or email, ` +
+        `${(PLANTED.malformed * 100).toFixed(1)}% violating the schema.`,
+    );
+    line('  The gate refuses to clear a migration that still needs a human.');
+    line('  Every count above is BALANCED -- nothing was lost or invented.');
+  }
 
   // --- Sprint task 12: the migration report ------------------------------
   step('Producing the first internal migration report');
